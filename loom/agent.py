@@ -113,7 +113,10 @@ def _emit(event_sink: "EventSink | None", event_type: str, payload: dict) -> Non
 
 # --- Tool execution -----------------------------------------------------------
 
-def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory) -> str:
+def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
+                 extra_handlers: dict | None = None) -> str:
+    if extra_handlers and name in extra_handlers:
+        return extra_handlers[name](args)
     if name == "run_bash_command":
         return run_bash_command(args["command"])
     if name in FILE_TOOL_HANDLERS:
@@ -130,7 +133,9 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
 def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, interactive: bool = True,
               task_id: str | None = None, event_sink: "EventSink | None" = None,
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
-              mode: str = permissions.WORKSPACE_WRITE, approver=None) -> str:
+              mode: str = permissions.WORKSPACE_WRITE, approver=None,
+              tools: list[dict] | None = None, extra_handlers: dict | None = None,
+              stop_when: Callable[[], bool] | None = None) -> str:
     """mode is the sandbox axis (read-only / workspace-write / full-access);
     `approver` is the approval axis — who gets asked when policy says ASK.
     They're independent on purpose: see permissions.py.
@@ -156,6 +161,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     system_prompt = build_system_prompt(model_key)  # model_key is fixed for this run
     todo_manager = TodoManager()  # own instance per run — never shared, no lock needed
     mem = mem or memory.default_memory()
+    tools = tools if tools is not None else ALL_TOOLS
 
     # This list IS the conversation — resent in full every call.
     history = [Turn(role="user", text=task)]
@@ -167,7 +173,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             for msg in injection_queue.drain(task_id):
                 history.append(Turn(role="user", text=f"[Message from human]: {msg}"))
                 _emit(event_sink, "human_message_injected", {"task_id": task_id, "content": msg})
-        response = provider.generate(history, ALL_TOOLS, system_prompt)
+        response = provider.generate(history, tools, system_prompt)
 
         if response.text:
             final_text = response.text
@@ -226,7 +232,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             else:
                 decision = permissions.classify(tc.name, args, mode)
                 if decision.action == permissions.ALLOW:
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem)
+                    result = execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
                 elif decision.action == permissions.DENY:
                     # Refused by the session's mode, not by a person — say so,
                     # so the model stops rather than re-asking a locked door.
@@ -246,7 +252,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                     # re-asking, and each new path still gets granted here.
                     if tc.name in permissions.PATH_TOOLS and args.get("path"):
                         file_tools.allow_path(args["path"])
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem)
+                    result = execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
                 else:
                     if verbose:
                         print("\033[91mDenied.\033[0m")
@@ -270,6 +276,9 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
 
             tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result))
             executed_results.append({"name": tc.name, "content": result})
+
+        if stop_when is not None and stop_when():
+            break
 
         if turn_count % COMPACT_EVERY == 0:
             # Drop the raw history, replace it with a summary — the todo list

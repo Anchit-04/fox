@@ -60,7 +60,7 @@ class Decision:
 
 # Tools that only ever touch session-internal state (the todo list, the shared
 # memory log). No filesystem path is involved, so there's no boundary to cross.
-INTERNAL_TOOLS = {"todo_write", "memory_read", "memory_write"}
+INTERNAL_TOOLS = {"todo_write", "memory_read", "memory_write", "report"}
 
 # tool name -> (argument holding the path, whether it modifies)
 PATH_TOOLS = {
