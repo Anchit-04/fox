@@ -23,7 +23,7 @@ class TaskStatus(Enum):
 # Terminal states map to the empty set: once there, a task never moves again.
 # Phase 3 adds VERIFYING and MERGED — that's new rows here, nothing else.
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
-    TaskStatus.QUEUED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
+    TaskStatus.QUEUED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED,TaskStatus.FAILED}),
     TaskStatus.RUNNING: frozenset({
         TaskStatus.NEEDS_APPROVAL,
         TaskStatus.DONE,
