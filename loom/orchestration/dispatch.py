@@ -1,14 +1,3 @@
-"""Runs one batch of tasks.
-
-Readers run in parallel; writers run one at a time; every task ends in a
-named state, including when its executor crashes. This is the only module
-in Phase 1 that uses threads.
-
-Replaces loom/dispatch.py (ScopeScheduler + DependencyGraph), which is
-deleted in step 7.
-
-Filled in Phase 1, step 4.
-"""
 import threading 
 from contextlib import nullcontext
 from agent import ALL_TOOLS,run_agent,_emit
@@ -16,6 +5,8 @@ from config import routing
 from orchestration.executor_tools import EXECUTOR_TOOLS,REPORT_INSTRUCTIONS,ReportCollector
 from orchestration.policy import Admission,PolicyRefusal,admit
 from orchestration.tasks import Task,TaskStatus 
+from orchestration.scope_audit import ScopeAudit
+
 
 def _set_status(task: Task, to: TaskStatus, event_sink,*,report=None, error=None)->None:
   task.transition(to,report=report,error=error)
@@ -34,6 +25,7 @@ def _memory_text(task: Task)->str:
 
 def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.Lock,*,mem,event_sink,injection_queue,approver)->None:
   collector = ReportCollector()
+  audit = ScopeAudit(task,event_sink)
   error = None
   slot = writer_slot if admission.needs_writer_slot else nullcontext()
   with slot:
@@ -45,7 +37,7 @@ def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.L
         model_key = model_key,
         interactive = False,
         task_id = task.id,
-        event_sink = event_sink,
+        event_sink = audit.sink,
         mem = mem,
         injection_queue=injection_queue,
         mode = admission.mode,
@@ -56,6 +48,7 @@ def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.L
       )
     except Exception as e:
       error = f"executor crashed: {type(e).__name__};{e}"
+  audit.finish()
   if error is None and collector.done:
     _set_status(task,TaskStatus.DONE,event_sink,report=collector.report)
   else:

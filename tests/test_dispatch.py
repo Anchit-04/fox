@@ -147,6 +147,27 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(statuses, ["running", "done"])
         self.assertEqual(kinds[-1], "memory_entry_added")
 
+    def test_every_executed_task_is_scope_audited(self):
+        self.agent.behaviour = "crash"
+        self.batch(Lane.READ, Lane.WRITE)
+        self.batch(Lane.WRITE, mode=permissions.READ_ONLY)
+        audited = sorted(p["task_id"] for e, p in self.events if e == "scope_audit")
+        self.assertEqual(audited, ["t1", "t2"])
+
+    def test_audit_sees_the_executors_writes(self):
+        def writes_undeclared(text, **kw):
+            sink = kw["event_sink"]
+            sink("tool_call", {"task_id": kw["task_id"], "name": "write_file", "args": {"path": "surprise.py"}})
+            sink("tool_result", {"task_id": kw["task_id"], "name": "write_file",
+                                 "content": '{"success": true}'})
+            kw["extra_handlers"]["report"](GOOD)
+        self.patch(dispatch, "run_agent", writes_undeclared)
+        self.batch(Lane.WRITE)
+        [audit] = [p for e, p in self.events if e == "scope_audit"]
+        self.assertEqual(audit["undeclared"], ["surprise.py"])
+        self.assertTrue(audit["mispredicted"])
+        self.assertIn("tool_call", [e for e, _ in self.events])
+
     def test_sweep_catches_a_thread_that_died(self):
         def bug(task, session_mode):
             raise KeyError("a bug nobody expected")
