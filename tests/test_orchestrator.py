@@ -1,0 +1,220 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
+
+import memory
+import permissions
+from injection import InjectionQueue
+from orchestration import dispatch
+from orchestration import orchestrator as orch
+from providers import ProviderResponse, ToolCall
+
+
+def delegate(call_id, description, lane="read", scope=None, **extra):
+    return ToolCall(call_id, "delegate_task",
+                    {"description": description, "lane": lane, "scope": scope or [], **extra})
+
+
+def reply(*calls, text=None):
+    return ProviderResponse(text=text, tool_calls=list(calls))
+
+
+def done(text="All done."):
+    return ProviderResponse(text=text, tool_calls=[])
+
+
+class ScriptedModel:
+    def __init__(self, *responses, forever=None, limit=100):
+        self.responses = list(responses)
+        self.forever = forever
+        self.limit = limit
+        self.requests = []
+
+    def generate(self, history, tools, system_prompt):
+        if len(self.requests) >= self.limit:
+            raise RuntimeError(f"orchestrator called the model more than {self.limit} times")
+        self.requests.append({"history": list(history), "tools": tools, "prompt": system_prompt})
+        if self.responses:
+            return self.responses.pop(0)
+        return self.forever() if self.forever else done("(script exhausted)")
+
+    def results_seen(self, n):
+        return [r.content for r in self.requests[n]["history"][-1].tool_results]
+
+
+def executor(text, **kw):
+    kw["extra_handlers"]["report"]({
+        "outcome": f"finished: {text.splitlines()[0]}",
+        "changes": ["cli.py"] if kw["mode"] != permissions.READ_ONLY else [],
+        "validation": "none",
+        "blockers": [],
+    })
+
+
+class OrchestratorTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.mem = memory.Memory(Path(tmp.name) / "mem.md")
+        self.events = []
+        self.executor_calls = []
+
+        def recording_executor(text, **kw):
+            self.executor_calls.append(text)
+            executor(text, **kw)
+
+        self.patch(dispatch, "run_agent", recording_executor)
+        self.patch(dispatch.routing, "pick_executor", lambda preferred=None: "fake-exec")
+
+    def patch(self, target, name, value):
+        patcher = mock.patch.object(target, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_with(self, model, mode=permissions.WORKSPACE_WRITE, **kw):
+        self.patch(orch, "get_provider", lambda key: model)
+        kw.setdefault("model_key", "qwen-27b")
+        return orch.run_orchestrator("add a --verbose flag", mem=self.mem, mode=mode,
+                                     event_sink=lambda e, p: self.events.append((e, p)), **kw)
+
+    def test_dependency_flows_through_the_conversation(self):
+        model = ScriptedModel(
+            reply(delegate("a", "find the env loader")),
+            reply(delegate("b", "add --verbose using what t1 found", lane="write", scope=["cli.py"])),
+            done("Added --verbose."),
+        )
+        final = self.run_with(model)
+        self.assertEqual(final, "Added --verbose.")
+        self.assertEqual(model.results_seen(1), ["t1 [read] done: finished: find the env loader"])
+        self.assertEqual(model.results_seen(2),
+                         ["t2 [write] done: finished: add --verbose using what t1 found | changed cli.py"])
+
+    def test_one_reply_is_one_batch_and_ids_continue(self):
+        batches = []
+        real = orch.run_batch
+        self.patch(orch, "run_batch", lambda tasks, *a, **k: (batches.append([t.id for t in tasks]),
+                                                               real(tasks, *a, **k)))
+        model = ScriptedModel(
+            reply(delegate("a", "one"), delegate("b", "two")),
+            reply(delegate("c", "three")),
+            done(),
+        )
+        self.run_with(model)
+        self.assertEqual(batches, [["t1", "t2"], ["t3"]])
+
+    def test_results_come_back_in_call_order(self):
+        model = ScriptedModel(
+            reply(delegate("a", "first"),
+                  ToolCall("m", "memory_write", {"content": "note"}),
+                  delegate("b", "second")),
+            done(),
+        )
+        self.run_with(model)
+        results = model.requests[1]["history"][-1].tool_results
+        self.assertEqual([r.call_id for r in results], ["a", "m", "b"])
+        self.assertTrue(results[0].content.startswith("t1 "))
+        self.assertEqual(json.loads(results[1].content), {"ok": True})
+        self.assertTrue(results[2].content.startswith("t2 "))
+
+    def test_memory_note_lands_before_the_batch_runs(self):
+        seen = []
+        self.patch(dispatch, "run_agent",
+                   lambda text, **kw: (seen.append("note_1" in kw["mem"].read_index()), executor(text, **kw)))
+        model = ScriptedModel(
+            reply(delegate("a", "use the note"), ToolCall("m", "memory_write", {"content": "use argparse"})),
+            done(),
+        )
+        self.run_with(model)
+        self.assertEqual(seen, [True])
+
+    def test_only_planning_tools_are_offered(self):
+        model = ScriptedModel(done())
+        self.run_with(model)
+        names = {t["name"] for t in model.requests[0]["tools"]}
+        self.assertEqual(names, {"delegate_task", "todo_write", "memory_read", "memory_write"})
+
+    def test_read_only_session_offers_only_read_and_refuses_write(self):
+        model = ScriptedModel(reply(delegate("a", "fix it", lane="write", scope=["cli.py"])), done())
+        self.run_with(model, mode=permissions.READ_ONLY)
+        [tool] = [t for t in model.requests[0]["tools"] if t["name"] == "delegate_task"]
+        self.assertEqual(tool["parameters"]["properties"]["lane"]["enum"], ["read"])
+        self.assertIn("read-only", model.requests[0]["prompt"])
+        [result] = model.results_seen(1)
+        self.assertTrue(result.startswith("t1 [write] failed: t1 refused"))
+        self.assertEqual(self.executor_calls, [])
+
+    def test_bad_delegation_is_reported_and_the_rest_still_run(self):
+        model = ScriptedModel(
+            reply(ToolCall("bad", "delegate_task", {"lane": "read"}), delegate("ok", "valid")),
+            done(),
+        )
+        self.run_with(model)
+        bad, ok = model.results_seen(1)
+        self.assertIn("Task not created", bad)
+        self.assertTrue(ok.startswith("t1 [read] done"))
+
+    def test_unknown_and_unparseable_calls_get_errors(self):
+        model = ScriptedModel(
+            reply(ToolCall("x", "run_bash_command", {"command": "rm -rf ."}),
+                  ToolCall("y", "todo_write", {}, raw={"args_parse_error": "bad", "raw_arguments": "{"})),
+            done(),
+        )
+        self.run_with(model)
+        bash, broken = model.results_seen(1)
+        self.assertIn("Unknown tool: run_bash_command", bash)
+        self.assertIn("Could not parse", broken)
+
+    def test_turn_cap_stops_a_looping_orchestrator(self):
+        model = ScriptedModel(forever=lambda: reply(ToolCall("t", "todo_write", {"todos": []})))
+        self.run_with(model)
+        self.assertEqual(len(model.requests), orch.MAX_ITERATIONS)
+        self.assertIn("error", [e for e, _ in self.events])
+
+    def test_compaction_keeps_every_task(self):
+        self.patch(orch, "COMPACT_EVERY", 2)
+        model = ScriptedModel(
+            reply(delegate("a", "first")),
+            reply(delegate("b", "second")),
+            done(),
+        )
+        self.run_with(model)
+        [only] = model.requests[2]["history"]
+        self.assertEqual(only.role, "user")
+        self.assertIn("Every task so far", only.text)
+        self.assertIn("t1 [read] done", only.text)
+        self.assertIn("t2 [read] done", only.text)
+
+    def test_injected_message_reaches_the_orchestrator(self):
+        queue = InjectionQueue()
+        queue.push(None, "use click, not argparse")
+        model = ScriptedModel(done())
+        self.run_with(model, injection_queue=queue)
+        texts = [t.text for t in model.requests[0]["history"]]
+        self.assertIn("[Message from human]: use click, not argparse", texts)
+
+    def test_final_text_is_the_last_thing_said(self):
+        model = ScriptedModel(reply(delegate("a", "x"), text="Starting."), done("Finished."))
+        self.assertEqual(self.run_with(model), "Finished.")
+
+    def test_picks_a_strong_model_when_none_is_given(self):
+        self.patch(orch.routing, "pick_orchestrator", lambda: "qwen-27b")
+        chosen = []
+        model = ScriptedModel(done())
+        self.patch(orch, "get_provider", lambda key: (chosen.append(key), model)[1])
+        orch.run_orchestrator("x", mem=self.mem)
+        self.assertEqual(chosen, ["qwen-27b"])
+
+    def test_unknown_mode_fails_before_any_model_call(self):
+        model = ScriptedModel(done())
+        with self.assertRaises(ValueError):
+            self.run_with(model, mode="yolo")
+        self.assertEqual(model.requests, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
