@@ -1,5 +1,8 @@
 import json
+import threading
+from dataclasses import dataclass
 
+from agent import _emit
 from orchestration.tasks import Report
 
 REPORT_TOOL = {
@@ -36,10 +39,32 @@ REPORT_TOOL = {
     },
 }
 
-EXECUTOR_TOOLS = [REPORT_TOOL]
+ASK_ORCHESTRATOR_TOOL = {
+    "type": "function",
+    "name": "ask_orchestrator",
+    "description": (
+        "Propose work that is outside your task, such as a bug you noticed elsewhere or a file "
+        "that also needs changing. Do not do that work yourself. The orchestrator reads proposals "
+        "after your batch finishes and decides what to do. You get no answer now: carry on with "
+        "your own task."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "proposal": {
+                "type": "string",
+                "description": "What should be done and why, in one or two sentences.",
+            },
+        },
+        "required": ["proposal"],
+    },
+}
+
+EXECUTOR_TOOLS = [REPORT_TOOL, ASK_ORCHESTRATOR_TOOL]
 
 REPORT_INSTRUCTIONS = (
-    "\n\nWhen you are finished, call the `report` tool instead of replying in plain text. "
+    "\n\nIf you find work outside this task, don't do it: propose it with `ask_orchestrator`. "
+    "When you are finished, call the `report` tool instead of replying in plain text. "
     "A task that ends without calling `report` counts as failed."
 )
 
@@ -88,3 +113,33 @@ class ReportCollector:
 
     def handlers(self) -> dict:
         return {"report": self.handle}
+
+
+@dataclass(frozen=True)
+class Proposal:
+    task_id: str
+    text: str
+
+
+class ProposalBox:
+    def __init__(self, event_sink=None):
+        self._event_sink = event_sink
+        self._lock = threading.Lock()
+        self._items: list[Proposal] = []
+
+    def handler_for(self, task_id: str):
+        def handle(args: dict) -> str:
+            text = args.get("proposal")
+            if not isinstance(text, str) or not text.strip():
+                return json.dumps({"error": "'proposal' must say what should be done and why."})
+            proposal = Proposal(task_id, text.strip())
+            with self._lock:
+                self._items.append(proposal)
+            _emit(self._event_sink, "proposal_made", {"task_id": task_id, "text": proposal.text})
+            return json.dumps({"ok": True, "note": "Proposal recorded. Do not do it yourself; carry on with your task."})
+        return handle
+
+    def drain(self) -> list[Proposal]:
+        with self._lock:
+            items, self._items = self._items, []
+        return items

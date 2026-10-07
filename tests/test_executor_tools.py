@@ -11,7 +11,7 @@ import agent
 import memory
 import permissions
 from orchestration.executor_tools import (
-    EXECUTOR_TOOLS, REPORT_TOOL, ReportCollector, parse_report,
+    EXECUTOR_TOOLS, REPORT_TOOL, Proposal, ProposalBox, ReportCollector, parse_report,
 )
 from orchestration.policy import READ_LANE_TOOLS
 from orchestration.tasks import Report
@@ -86,9 +86,50 @@ class Wiring(unittest.TestCase):
     def test_readers_receive_report(self):
         self.assertIn("report", READ_LANE_TOOLS)
 
+    def test_ask_orchestrator_needs_no_approval_and_readers_get_it(self):
+        for mode in permissions.MODES:
+            self.assertEqual(permissions.classify("ask_orchestrator", {}, mode).action, permissions.ALLOW)
+        self.assertIn("ask_orchestrator", READ_LANE_TOOLS)
+
     def test_executor_tools_are_named_consistently(self):
-        self.assertEqual([t["name"] for t in EXECUTOR_TOOLS], ["report"])
+        self.assertEqual([t["name"] for t in EXECUTOR_TOOLS], ["report", "ask_orchestrator"])
         self.assertEqual(set(REPORT_TOOL["parameters"]["required"]), set(GOOD))
+
+
+class Proposals(unittest.TestCase):
+    def test_proposal_is_tagged_with_the_handlers_task(self):
+        box = ProposalBox()
+        box.handler_for("t2")({"proposal": "  README documents the old flags  "})
+        self.assertEqual(box.drain(), [Proposal("t2", "README documents the old flags")])
+
+    def test_empty_proposal_is_refused(self):
+        box = ProposalBox()
+        for bad in ({}, {"proposal": "  "}, {"proposal": 3}):
+            self.assertIn("error", json.loads(box.handler_for("t1")(bad)))
+        self.assertEqual(box.drain(), [])
+
+    def test_drain_empties_the_box(self):
+        box = ProposalBox()
+        box.handler_for("t1")({"proposal": "x"})
+        self.assertEqual(len(box.drain()), 1)
+        self.assertEqual(box.drain(), [])
+
+    def test_proposal_is_announced(self):
+        seen = []
+        box = ProposalBox(lambda e, p: seen.append((e, p)))
+        box.handler_for("t3")({"proposal": "fix the typo in setup.py"})
+        self.assertEqual(seen, [("proposal_made", {"task_id": "t3", "text": "fix the typo in setup.py"})])
+
+    def test_concurrent_proposals_are_all_kept(self):
+        import threading
+        box = ProposalBox()
+        threads = [threading.Thread(target=box.handler_for(f"t{i}"), args=({"proposal": f"idea {i}"},))
+                   for i in range(64)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        self.assertEqual(sorted(p.task_id for p in box.drain()), sorted(f"t{i}" for i in range(64)))
 
 
 class FakeProvider:

@@ -2,7 +2,7 @@ import threading
 from contextlib import nullcontext
 from agent import ALL_TOOLS,run_agent,_emit
 from config import routing 
-from orchestration.executor_tools import EXECUTOR_TOOLS,REPORT_INSTRUCTIONS,ReportCollector
+from orchestration.executor_tools import EXECUTOR_TOOLS,REPORT_INSTRUCTIONS,Proposal,ProposalBox,ReportCollector
 from orchestration.policy import Admission,PolicyRefusal,admit
 from orchestration.tasks import Task,TaskStatus 
 from orchestration.scope_audit import ScopeAudit
@@ -23,7 +23,7 @@ def _memory_text(task: Task)->str:
     f"blockers: {';'.join(r.blockers) or 'none'}"
   )
 
-def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.Lock,*,mem,event_sink,injection_queue,approver)->None:
+def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.Lock,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox)->None:
   collector = ReportCollector()
   audit = ScopeAudit(task,event_sink)
   error = None
@@ -43,7 +43,7 @@ def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.L
         mode = admission.mode,
         approver = approver,
         tools = admission.tools(ALL_TOOLS+EXECUTOR_TOOLS),
-        extra_handlers= collector.handlers(),
+        extra_handlers= {**collector.handlers(),"ask_orchestrator":proposals.handler_for(task.id)},
         stop_when = lambda: collector.done,
       )
     except Exception as e:
@@ -55,7 +55,7 @@ def _execute(task:Task,admission:Admission,model_key:str,writer_slot:threading.L
     _set_status(task,TaskStatus.FAILED,event_sink,error=error or "ended without calling report")
       
       
-def _run_one(task:Task, session_mode:str,writer_slot:threading.Lock,*,mem,event_sink,injection_queue,approver)->None:
+def _run_one(task:Task, session_mode:str,writer_slot:threading.Lock,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox)->None:
   model_key= "none"
   try:
     admission = admit(task,session_mode)
@@ -63,15 +63,16 @@ def _run_one(task:Task, session_mode:str,writer_slot:threading.Lock,*,mem,event_
   except(PolicyRefusal,routing.RoutingError) as e:
     _set_status(task,TaskStatus.FAILED,event_sink,error = str(e))
   else:
-    _execute(task,admission,model_key,writer_slot,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver)
+    _execute(task,admission,model_key,writer_slot,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals)
   mem.append_entry(task.id,model_key,_memory_text(task),scope =task.scope,kind="task_result")
   _emit(event_sink,"memory_entry_added",{"task_id":task.id,"agent":model_key})
 
-def run_batch(tasks:list[Task],session_mode:str,*,mem,event_sink=None,injection_queue=None,approver=None)->None:
+def run_batch(tasks:list[Task],session_mode:str,*,mem,event_sink=None,injection_queue=None,approver=None)->list[Proposal]:
   writer_slot = threading.Lock()
+  proposals = ProposalBox(event_sink)
   for task in tasks:
     _emit(event_sink,"task_created",{"task_id":task.id,"description":task.description,"lane":task.lane.value,"scope":task.scope})
-  threads = [ threading.Thread(target=_run_one,args=(task,session_mode,writer_slot),kwargs={"mem":mem,"event_sink":event_sink,"injection_queue":injection_queue,"approver":approver}) for task in tasks]
+  threads = [ threading.Thread(target=_run_one,args=(task,session_mode,writer_slot),kwargs={"mem":mem,"event_sink":event_sink,"injection_queue":injection_queue,"approver":approver,"proposals":proposals}) for task in tasks]
   for th in threads:
     th.start()
   for th in threads:
@@ -79,4 +80,5 @@ def run_batch(tasks:list[Task],session_mode:str,*,mem,event_sink=None,injection_
   for task in tasks:
     if not task.is_terminal:
       _set_status(task,TaskStatus.FAILED,event_sink,error="executor thread ended without a final state")
+  return proposals.drain()
     

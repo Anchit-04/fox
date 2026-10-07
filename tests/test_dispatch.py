@@ -168,6 +168,32 @@ class DispatchTests(unittest.TestCase):
         self.assertTrue(audit["mispredicted"])
         self.assertIn("tool_call", [e for e, _ in self.events])
 
+    def test_proposals_do_not_leak_between_batches(self):
+        def proposes(text, **kw):
+            kw["extra_handlers"]["ask_orchestrator"]({"proposal": f"idea from {kw['task_id']}"})
+            kw["extra_handlers"]["report"](GOOD)
+        self.patch(dispatch, "run_agent", proposes)
+        dispatch.run_batch([Task("t1", "a", Lane.READ, [])], permissions.WORKSPACE_WRITE, mem=self.mem)
+        second = dispatch.run_batch([Task("t2", "b", Lane.READ, [])], permissions.WORKSPACE_WRITE, mem=self.mem)
+        self.assertEqual([(p.task_id, p.text) for p in second], [("t2", "idea from t2")])
+
+    def test_batch_returns_every_proposal_and_announces_them(self):
+        def proposes(text, **kw):
+            kw["extra_handlers"]["ask_orchestrator"]({"proposal": f"idea from {kw['task_id']}"})
+            kw["extra_handlers"]["report"](GOOD)
+        self.patch(dispatch, "run_agent", proposes)
+        tasks = [Task("t1", "a", Lane.READ, []), Task("t2", "b", Lane.WRITE, [])]
+        proposals = dispatch.run_batch(tasks, permissions.WORKSPACE_WRITE, mem=self.mem,
+                                       event_sink=lambda e, p: self.events.append((e, p)))
+        self.assertEqual(sorted((p.task_id, p.text) for p in proposals),
+                         [("t1", "idea from t1"), ("t2", "idea from t2")])
+        announced = sorted(p["task_id"] for e, p in self.events if e == "proposal_made")
+        self.assertEqual(announced, ["t1", "t2"])
+
+    def test_a_batch_without_proposals_returns_none(self):
+        tasks = [Task("t1", "a", Lane.READ, [])]
+        self.assertEqual(dispatch.run_batch(tasks, permissions.WORKSPACE_WRITE, mem=self.mem), [])
+
     def test_sweep_catches_a_thread_that_died(self):
         def bug(task, session_mode):
             raise KeyError("a bug nobody expected")

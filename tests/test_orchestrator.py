@@ -97,8 +97,12 @@ class OrchestratorTests(unittest.TestCase):
     def test_one_reply_is_one_batch_and_ids_continue(self):
         batches = []
         real = orch.run_batch
-        self.patch(orch, "run_batch", lambda tasks, *a, **k: (batches.append([t.id for t in tasks]),
-                                                               real(tasks, *a, **k)))
+
+        def counting_run_batch(tasks, *a, **k):
+            batches.append([t.id for t in tasks])
+            return real(tasks, *a, **k)
+
+        self.patch(orch, "run_batch", counting_run_batch)
         model = ScriptedModel(
             reply(delegate("a", "one"), delegate("b", "two")),
             reply(delegate("c", "three")),
@@ -208,6 +212,37 @@ class OrchestratorTests(unittest.TestCase):
         self.patch(orch, "get_provider", lambda key: (chosen.append(key), model)[1])
         orch.run_orchestrator("x", mem=self.mem)
         self.assertEqual(chosen, ["qwen-27b"])
+
+    def test_proposals_reach_the_next_turn_on_the_right_task(self):
+        def executor_that_proposes(text, **kw):
+            if "flag" in text:
+                kw["extra_handlers"]["ask_orchestrator"]({"proposal": "README documents the old flags"})
+                kw["extra_handlers"]["ask_orchestrator"]({"proposal": "tests/ has no cli tests"})
+            executor(text, **kw)
+        self.patch(dispatch, "run_agent", executor_that_proposes)
+        model = ScriptedModel(
+            reply(delegate("a", "look around"), delegate("b", "add the flag", lane="write", scope=["cli.py"])),
+            done(),
+        )
+        self.run_with(model)
+        quiet, proposing = model.results_seen(1)
+        self.assertNotIn("proposes", quiet)
+        self.assertTrue(proposing.startswith("t2 [write] done"))
+        self.assertTrue(proposing.endswith("proposes: README documents the old flags; tests/ has no cli tests"))
+
+    def test_a_failed_task_can_still_propose(self):
+        def gives_up(text, **kw):
+            kw["extra_handlers"]["ask_orchestrator"]({"proposal": "split this task"})
+        self.patch(dispatch, "run_agent", gives_up)
+        model = ScriptedModel(reply(delegate("a", "too big")), done())
+        self.run_with(model)
+        [result] = model.results_seen(1)
+        self.assertEqual(result, "t1 [read] failed: ended without calling report | proposes: split this task")
+
+    def test_prompt_explains_proposals(self):
+        model = ScriptedModel(done())
+        self.run_with(model)
+        self.assertIn("proposes:", model.requests[0]["prompt"])
 
     def test_unknown_mode_fails_before_any_model_call(self):
         model = ScriptedModel(done())

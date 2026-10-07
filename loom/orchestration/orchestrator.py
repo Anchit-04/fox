@@ -26,6 +26,7 @@ How to plan:
 - Write every description so it stands alone. The executor cannot see this conversation.
 - Declare scope honestly: the files a task will change, or [] for a read task. Scope does not lock anything; it is compared with what the task actually wrote.
 - If a task failed, read its error and decide: retry it with a better description, split it, or explain the problem to the user.
+- Executors may propose work outside their task; it appears as "proposes: ..." on their result. Decide each proposal: delegate it, fold it into another task, or leave it. If you leave one, say so in your final answer.
 - Each task's full result is in shared memory under its id. Use memory_read with the id, for example "t3", when the one-line summary is not enough.
 - Use todo_write to keep your plan.
 - When the whole job is done, reply in plain text with no tool calls. That reply is your final answer to the user.
@@ -85,15 +86,18 @@ def _create_task(registry: TaskRegistry, args: dict) -> Task:
     )
 
 
-def _summarize(task: Task) -> str:
+def _summarize(task: Task, proposals: tuple[str, ...] = ()) -> str:
     head = f"{task.id} [{task.lane.value}] {task.status.value}"
     if task.report is None:
-        return f"{head}: {task.error}"
-    parts = [f"{head}: {task.report.outcome}"]
-    if task.report.changes:
-        parts.append(f"changed {', '.join(task.report.changes)}")
-    if task.report.blockers:
-        parts.append(f"blockers: {'; '.join(task.report.blockers)}")
+        parts = [f"{head}: {task.error}"]
+    else:
+        parts = [f"{head}: {task.report.outcome}"]
+        if task.report.changes:
+            parts.append(f"changed {', '.join(task.report.changes)}")
+        if task.report.blockers:
+            parts.append(f"blockers: {'; '.join(task.report.blockers)}")
+    if proposals:
+        parts.append(f"proposes: {'; '.join(proposals)}")
     return " | ".join(parts)
 
 
@@ -156,10 +160,13 @@ def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
             results[tc.id] = _run_internal(tc.name, tc.args, run)
 
     if batch:
-        run_batch(list(batch.values()), run.mode, mem=run.mem, event_sink=run.event_sink,
-                  injection_queue=run.injection_queue, approver=run.approver)
+        proposals = run_batch(list(batch.values()), run.mode, mem=run.mem, event_sink=run.event_sink,
+                              injection_queue=run.injection_queue, approver=run.approver)
+        by_task: dict[str, list[str]] = {}
+        for p in proposals:
+            by_task.setdefault(p.task_id, []).append(p.text)
         for call_id, task in batch.items():
-            results[call_id] = _summarize(task)
+            results[call_id] = _summarize(task, tuple(by_task.get(task.id, ())))
 
     for tc in calls:
         _emit(run.event_sink, "tool_result", {"task_id": None, "name": tc.name, "content": results[tc.id]})
