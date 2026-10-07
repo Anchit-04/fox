@@ -150,8 +150,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     all defaulted so the plain CLI still works unchanged). keep_alive=True is
     for a live top-level chat session only — never set it for a delegated
     executor task, or it'll block forever waiting for input nobody's going to
-    send, deadlocking whatever's waiting on this task via
-    DependencyGraph.wait_for_dependencies()."""
+    send, and its whole batch with it: run_batch joins every executor thread."""
     provider = get_provider(model_key)
     # Start from no grants, whatever happened on this thread before. Clearing
     # only on the way out would miss a run that raised, and two sequential

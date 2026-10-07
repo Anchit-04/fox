@@ -1191,18 +1191,25 @@ func main() {
 		return
 	}
 
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+	mode := "agent"
+	if len(args) > 0 && args[0] == "--orchestrator" {
+		mode = "orchestrator"
+		args = args[1:]
+	}
+	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, `Usage: tui "<task>" [model_key]`)
+		fmt.Fprintln(os.Stderr, `       tui --orchestrator "<task>" [model_key]`)
 		fmt.Fprintln(os.Stderr, `       tui --attach <session_id>`)
 		os.Exit(1)
 	}
-	task := os.Args[1]
+	task := args[0]
 	modelKey := "" // empty means "let the backend pick any available key"
-	if len(os.Args) > 2 {
-		modelKey = os.Args[2]
+	if len(args) > 1 {
+		modelKey = args[1]
 	}
 
-	conn, sessionID, err := connect(url, task, modelKey, "agent")
+	conn, sessionID, err := connect(url, task, modelKey, mode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to connect:", err)
 		os.Exit(1)

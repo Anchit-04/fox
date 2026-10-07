@@ -138,7 +138,7 @@ def _run_internal(name: str, args: dict, run: _Run) -> str:
         _emit(run.event_sink, "todo_updated", {"task_id": None, "checklist": run.todo.render()})
         return result
     if name in memory.MEMORY_TOOL_HANDLERS:
-        return memory.MEMORY_TOOL_HANDLERS[name](run.mem, run.model_key, args) or json.dumps({"ok": True})
+        return memory.MEMORY_TOOL_HANDLERS[name](run.mem, run.model_key, args)
     return json.dumps({
         "error": f"Unknown tool: {name}. You can only use delegate_task, todo_write, memory_read and memory_write."
     })

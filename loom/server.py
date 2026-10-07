@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, asdict
 import websockets
 
 import agent
-import orchestrator
 import memory
 from config import routing, vault
 from injection import InjectionQueue
@@ -16,6 +15,7 @@ from approval import ApprovalGate
 import permissions
 import paths
 from paths import FOX_HOME
+from orchestration.orchestrator import run_orchestrator
 
 # FOX_HOME: session transcripts are Fox's own record, not project files,
 # and session ids are unique so one directory serves every workspace.
@@ -68,7 +68,7 @@ class Session:
                 self.state.tasks[payload["task_id"]] = {
                     "description": payload.get("description", ""),
                     "scope": payload.get("scope", []),
-                    "depends_on": payload.get("depends_on", []),
+                    "lane": payload.get("lane"),
                 }
             if event_type == "task_status_changed" and payload.get("task_id") is not None:
                 self.state.task_statuses[payload["task_id"]] = payload.get("status")
@@ -144,8 +144,8 @@ def _start_session(task: str, model_key: str | None, mode: str, loop: asyncio.Ab
     def run():
         try:
             if mode == "orchestrator":
-                final = orchestrator.run_orchestrator(
-                    task, verbose=False, model_key=model_key,
+                final = run_orchestrator(
+                    task, model_key=model_key,
                     event_sink=session.handle_event, mem=mem,
                     injection_queue=session.injection_queue,
                     approver=session.approval_gate, mode=permission_mode,

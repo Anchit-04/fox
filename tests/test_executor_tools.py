@@ -91,6 +91,15 @@ class Wiring(unittest.TestCase):
             self.assertEqual(permissions.classify("ask_orchestrator", {}, mode).action, permissions.ALLOW)
         self.assertIn("ask_orchestrator", READ_LANE_TOOLS)
 
+    def test_memory_write_returns_the_note_id_it_can_be_read_back_by(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = memory.Memory(Path(tmp) / "mem.md")
+            write, read = memory.MEMORY_TOOL_HANDLERS["memory_write"], memory.MEMORY_TOOL_HANDLERS["memory_read"]
+            first = json.loads(write(mem, "gemini-flash", {"content": "use argparse"}))
+            second = json.loads(write(mem, "gemini-flash", {"content": "tests live in tests/"}))
+            self.assertEqual((first, second), ({"ok": True, "id": "note_1"}, {"ok": True, "id": "note_2"}))
+            self.assertIn("use argparse", read(mem, "x", {"entry_id": first["id"]}))
+
     def test_executor_tools_are_named_consistently(self):
         self.assertEqual([t["name"] for t in EXECUTOR_TOOLS], ["report", "ask_orchestrator"])
         self.assertEqual(set(REPORT_TOOL["parameters"]["required"]), set(GOOD))

@@ -122,7 +122,7 @@ class OrchestratorTests(unittest.TestCase):
         results = model.requests[1]["history"][-1].tool_results
         self.assertEqual([r.call_id for r in results], ["a", "m", "b"])
         self.assertTrue(results[0].content.startswith("t1 "))
-        self.assertEqual(json.loads(results[1].content), {"ok": True})
+        self.assertEqual(json.loads(results[1].content), {"ok": True, "id": "note_1"})
         self.assertTrue(results[2].content.startswith("t2 "))
 
     def test_memory_note_lands_before_the_batch_runs(self):
