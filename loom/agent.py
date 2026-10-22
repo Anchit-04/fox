@@ -208,7 +208,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             break
 
         # Assistant turn has to land in history before its tool results do.
-        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls))
+        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
 
         tool_results = []
         executed_results = []  # kept alongside tool_results for compaction summaries

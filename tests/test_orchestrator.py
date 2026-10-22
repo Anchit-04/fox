@@ -78,7 +78,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def run_with(self, model, mode=permissions.WORKSPACE_WRITE, **kw):
         self.patch(orch, "get_provider", lambda key: model)
-        kw.setdefault("model_key", "qwen-27b")
+        kw.setdefault("model_key", "claude-opus")
         return orch.run_orchestrator("add a --verbose flag", mem=self.mem, mode=mode,
                                      event_sink=lambda e, p: self.events.append((e, p)), **kw)
 
@@ -206,12 +206,12 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(self.run_with(model), "Finished.")
 
     def test_picks_a_strong_model_when_none_is_given(self):
-        self.patch(orch.routing, "pick_orchestrator", lambda: "qwen-27b")
+        self.patch(orch.routing, "pick_orchestrator", lambda: "claude-opus")
         chosen = []
         model = ScriptedModel(done())
         self.patch(orch, "get_provider", lambda key: (chosen.append(key), model)[1])
         orch.run_orchestrator("x", mem=self.mem)
-        self.assertEqual(chosen, ["qwen-27b"])
+        self.assertEqual(chosen, ["claude-opus"])
 
     def test_proposals_reach_the_next_turn_on_the_right_task(self):
         def executor_that_proposes(text, **kw):

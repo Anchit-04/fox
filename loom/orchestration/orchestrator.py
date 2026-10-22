@@ -207,7 +207,7 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
             _emit(event_sink, "error", {"task_id": None, "message": f"hit the {MAX_ITERATIONS}-turn safety cap"})
             break
 
-        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls))
+        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
         results = _run_turn(response.tool_calls, run)
 
         if turns % COMPACT_EVERY == 0:

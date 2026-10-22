@@ -11,7 +11,7 @@ import time
 from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
 MAX_RETRIES = 5
-MAX_TOKENS = 4096
+MAX_TOKENS = 16000
 
 
 class AnthropicProvider(Provider):
@@ -41,18 +41,22 @@ class AnthropicProvider(Provider):
             messages=messages,
             tools=anthropic_tools,
         )
+        if response.stop_reason == "refusal":
+            category = response.stop_details.category if response.stop_details else None
+            raise RuntimeError(f"{self.model_id} refused the request (category: {category})")
 
         text = "".join(b.text for b in response.content if b.type == "text") or None
         tool_calls = [
             ToolCall(id=b.id, name=b.name, args=b.input)
             for b in response.content if b.type == "tool_use"
         ]
-        return ProviderResponse(text=text, tool_calls=tool_calls)
+        return ProviderResponse(text=text, tool_calls=tool_calls, raw=list(response.content))
 
     def _create_with_retry(self, **kwargs):
         for attempt in range(MAX_RETRIES):
             try:
-                return self._client.messages.create(**kwargs)
+                with self._client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
             except self._anthropic.RateLimitError:
                 wait = 2 ** attempt
                 if attempt == MAX_RETRIES - 1:
@@ -72,6 +76,8 @@ def _to_anthropic_messages(history: list) -> list:
                     for tr in turn.tool_results
                 ],
             })
+        elif turn.role == "assistant" and turn.raw is not None:
+            messages.append({"role": "assistant", "content": turn.raw})
         elif turn.role == "assistant":
             content = []
             if turn.text:

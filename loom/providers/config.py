@@ -14,17 +14,23 @@ from .gemini import GeminiProvider
 from .openai_compatible import OpenAICompatibleProvider
 
 MODEL_REGISTRY = {
+    "claude-opus": {
+        "provider": AnthropicProvider,
+        "model_id": "claude-opus-5-5",
+        "env_key": "ANTHROPIC_API_KEY",
+        "tier": "strong",
+    },
+    "claude-haiku": {
+        "provider": AnthropicProvider,
+        "model_id": "claude-haiku-5-5",
+        "env_key": "ANTHROPIC_API_KEY",
+        "tier": "cheap",
+    },
     "gemini-flash": {
         "provider": GeminiProvider,
         "model_id": "gemini-3.8-flash",  # was 3.6-flash — that id started returning 503 "high demand"; 3.8 is current-gen and on the same key
         "env_key": "GEMINI_API_KEY",
         "tier": "cheap",
-    },
-    "claude-opus": {
-        "provider": AnthropicProvider,
-        "model_id": "claude-opus-5",
-        "env_key": "ANTHROPIC_API_KEY",
-        "tier": "strong",
     },
     "deepseek-chat": {
         "provider": OpenAICompatibleProvider,
@@ -63,22 +69,6 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "cheap",
-    },
-    # Orchestrator for testing — the only free model that planned properly in a
-    # 2026-10-01 probe against the real delegate_task schema: three parallel
-    # delegations, honest per-file scopes, and the investigation marked
-    # read-only with an empty scope, unprompted. Slow (85–138s per planning
-    # turn), which an orchestrator tolerates since it makes few calls; never
-    # use it as an executor. "strong" here means "plans well enough to test
-    # orchestration", not frontier-class. Rejected in the same probe:
-    # nemotron-3-super-120b (one delegation, scope ['/']), gemma-4-31b (one
-    # delegation, scope ['.']), inkling (403, gated to listed harnesses).
-    "qwen-27b": {
-        "provider": OpenAICompatibleProvider,
-        "model_id": "qwen/qwen3.8-27b:free",
-        "env_key": "OPENROUTER_API_KEY",
-        "base_url": "https://openrouter.ai/api/v1",
-        "tier": "strong",
     },
     # 1M context — the one to reach for when a task reads a lot of files.
     # ~6.5s/call. Its 550b sibling also tool-calls but takes ~39s, unusable here.

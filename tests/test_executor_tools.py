@@ -202,6 +202,17 @@ class RunAgentHooks(unittest.TestCase):
                       extra_handlers=c.handlers(), stop_when=lambda: c.done)
         self.assertFalse(c.done)
 
+    def test_raw_reply_blocks_are_kept_on_the_turn(self):
+        seen = []
+        first = ProviderResponse(text=None, tool_calls=[ToolCall(id="c1", name="memory_read", args={"entry_id": "x"})],
+                                 raw=["provider-blocks"])
+        fake = FakeProvider([first, ProviderResponse(text="ok", tool_calls=[])])
+        original = fake.generate
+        fake.generate = lambda history, tools, prompt: (seen.append(list(history)), original(history, tools, prompt))[1]
+        with mock.patch.object(agent, "get_provider", return_value=fake):
+            agent.run_agent("task", verbose=False, interactive=False, mem=self.mem)
+        self.assertEqual(seen[1][1].raw, ["provider-blocks"])
+
     def test_extra_handlers_take_priority(self):
         seen = []
         self.run_with([call("memory_read", {"entry_id": "x"}), ProviderResponse(text="ok", tool_calls=[])],
