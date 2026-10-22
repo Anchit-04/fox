@@ -128,6 +128,51 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
+def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
+                  extra_handlers: dict | None = None, event_sink: "EventSink | None" = None,
+                  task_id: str | None = None, verbose: bool = False) -> str:
+    args = tc.args
+    if tc.raw and tc.raw.get("args_parse_error"):
+        # Adapter couldn't parse this call's JSON args — don't execute
+        # with empty/wrong args, hand back a tool-error the model can react to.
+        raw_args = tc.raw.get("raw_arguments", "")
+        return json.dumps({
+            "error": f"Could not parse arguments for {tc.name}: {tc.raw['args_parse_error']}. "
+                     f"Raw arguments received: {raw_args[:300]!r}. "
+                     "Retry the call with valid JSON arguments."
+        })
+    decision = permissions.classify(tc.name, args, mode)
+    if decision.action == permissions.ALLOW:
+        return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
+    if decision.action == permissions.DENY:
+        # Refused by the session's mode, not by a person — say so,
+        # so the model stops rather than re-asking a locked door.
+        _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": decision.reason})
+        return json.dumps({
+            "error": f"Refused: {decision.reason}. This session's permission "
+                     "mode forbids it — don't retry, and don't work around it. "
+                     "Tell the user what you needed and why."
+        })
+    if approver.approve(tc.name, args, decision.reason):
+        # Consent has to actually grant the thing. The file tools
+        # are workspace-bound in _resolve(), so without this an
+        # approved out-of-workspace write would still fail — the
+        # prompt would be asking a question it couldn't honour.
+        # Covers "always" too: approve() returns True without
+        # re-asking, and each new path still gets granted here.
+        if tc.name in permissions.PATH_TOOLS and args.get("path"):
+            file_tools.allow_path(args["path"])
+        return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
+    if verbose:
+        print("\033[91mDenied.\033[0m")
+    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": "denied by user"})
+    return json.dumps({
+        "error": "User denied this action. Do not retry it as-is — "
+                 "explain what you were trying to do and ask how to proceed, "
+                 "or try a different approach."
+    })
+
+
 # --- The agent loop -----------------------------------------------------------
 
 def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, interactive: bool = True,
@@ -219,49 +264,9 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 print(f"\033[93m$ {args.get('command', '')}\033[0m")
             _emit(event_sink, "tool_call", {"task_id": task_id, "name": tc.name, "args": args})
 
-            if tc.raw and tc.raw.get("args_parse_error"):
-                # Adapter couldn't parse this call's JSON args — don't execute
-                # with empty/wrong args, hand back a tool-error the model can react to.
-                raw_args = tc.raw.get("raw_arguments", "")
-                result = json.dumps({
-                    "error": f"Could not parse arguments for {tc.name}: {tc.raw['args_parse_error']}. "
-                             f"Raw arguments received: {raw_args[:300]!r}. "
-                             "Retry the call with valid JSON arguments."
-                })
-            else:
-                decision = permissions.classify(tc.name, args, mode)
-                if decision.action == permissions.ALLOW:
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
-                elif decision.action == permissions.DENY:
-                    # Refused by the session's mode, not by a person — say so,
-                    # so the model stops rather than re-asking a locked door.
-                    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name,
-                                                      "reason": decision.reason})
-                    result = json.dumps({
-                        "error": f"Refused: {decision.reason}. This session's permission "
-                                 "mode forbids it — don't retry, and don't work around it. "
-                                 "Tell the user what you needed and why."
-                    })
-                elif approver.approve(tc.name, args, decision.reason):
-                    # Consent has to actually grant the thing. The file tools
-                    # are workspace-bound in _resolve(), so without this an
-                    # approved out-of-workspace write would still fail — the
-                    # prompt would be asking a question it couldn't honour.
-                    # Covers "always" too: approve() returns True without
-                    # re-asking, and each new path still gets granted here.
-                    if tc.name in permissions.PATH_TOOLS and args.get("path"):
-                        file_tools.allow_path(args["path"])
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
-                else:
-                    if verbose:
-                        print("\033[91mDenied.\033[0m")
-                    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name,
-                                                      "reason": "denied by user"})
-                    result = json.dumps({
-                        "error": "User denied this action. Do not retry it as-is — "
-                                 "explain what you were trying to do and ask how to proceed, "
-                                 "or try a different approach."
-                    })
+            result = run_tool_call(tc, mode=mode, approver=approver, model_key=model_key,
+                                   todo_manager=todo_manager, mem=mem, extra_handlers=extra_handlers,
+                                   event_sink=event_sink, task_id=task_id, verbose=verbose)
 
             if verbose:
                 if tc.name == "todo_write":
