@@ -37,6 +37,9 @@ class OpenAICompatibleProvider(Provider):
         ]
         response = self._create_with_retry(model=self.model_id, messages=messages, tools=oai_tools)
 
+        if not response.choices:
+            error = getattr(response, "error", None) or "no choices in the response"
+            raise RuntimeError(f"{self.model_id} returned no completion: {error}")
         choice = response.choices[0].message
         tool_calls = []
         for tc in (choice.tool_calls or []):
