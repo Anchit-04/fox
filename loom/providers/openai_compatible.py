@@ -12,7 +12,7 @@ import time
 
 from openai import OpenAI, RateLimitError
 
-from .base import Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
 MAX_RETRIES = 5
 
@@ -20,7 +20,7 @@ MAX_RETRIES = 5
 class OpenAICompatibleProvider(Provider):
     def __init__(self, model_id: str, env_key: str, base_url: str | None = None):
         super().__init__(model_id, env_key, base_url)
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=REQUEST_TIMEOUT_SECONDS)
 
     def generate(self, history: list[Turn], tools: list[dict], system_prompt: str) -> ProviderResponse:
         messages = [{"role": "system", "content": system_prompt}] + _to_openai_messages(history)

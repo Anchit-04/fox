@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import os
 
+REQUEST_TIMEOUT_SECONDS = 120
+
 
 @dataclass
 class ToolCall:

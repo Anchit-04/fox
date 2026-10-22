@@ -8,7 +8,7 @@ models that don't need Claude) still work without this package installed.
 
 import time
 
-from .base import Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
 MAX_RETRIES = 5
 MAX_TOKENS = 4096
@@ -24,7 +24,9 @@ class AnthropicProvider(Provider):
                 "AnthropicProvider needs the `anthropic` package: pip install anthropic"
             ) from e
         self._anthropic = anthropic
-        self._client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
+        self._client = anthropic.Anthropic(
+            api_key=self.api_key, base_url=self.base_url, timeout=REQUEST_TIMEOUT_SECONDS
+        )
 
     def generate(self, history: list[Turn], tools: list[dict], system_prompt: str) -> ProviderResponse:
         messages = _to_anthropic_messages(history)

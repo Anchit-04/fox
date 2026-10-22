@@ -10,7 +10,7 @@ import time
 from google import genai
 from google.genai import types
 
-from .base import Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
 MAX_RETRIES = 5
 
@@ -18,7 +18,10 @@ MAX_RETRIES = 5
 class GeminiProvider(Provider):
     def __init__(self, model_id: str, env_key: str, base_url: str | None = None):
         super().__init__(model_id, env_key, base_url)
-        self._client = genai.Client(api_key=self.api_key)
+        self._client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_SECONDS * 1000),
+        )
 
     def generate(self, history: list[Turn], tools: list[dict], system_prompt: str) -> ProviderResponse:
         contents = _to_gemini_contents(history)
