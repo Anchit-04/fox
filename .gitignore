@@ -10,3 +10,6 @@ PLAN.md
 *.exe
 *.exe~
 loom/sandbox/sandboxd/sandboxd
+
+# Editor settings are per-machine.
+.vscode/
