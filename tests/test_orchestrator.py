@@ -7,6 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
+import agent
 import memory
 import permissions
 from injection import InjectionQueue
@@ -71,8 +72,16 @@ class OrchestratorTests(unittest.TestCase):
         self.patch(dispatch, "run_agent", recording_executor)
         self.patch(dispatch.routing, "pick_executor", lambda preferred=None: "fake-exec")
 
+        self.bash_runs = []
+        self.patch(agent, "run_bash_command", lambda command: self.bash_runs.append(command) or "ran")
+
     def patch(self, target, name, value):
         patcher = mock.patch.object(target, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def file_handler(self, name, handler):
+        patcher = mock.patch.dict(agent.FILE_TOOL_HANDLERS, {name: handler})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -136,11 +145,59 @@ class OrchestratorTests(unittest.TestCase):
         self.run_with(model)
         self.assertEqual(seen, [True])
 
-    def test_only_planning_tools_are_offered(self):
+    def test_orchestrator_gets_every_tool_plus_delegation(self):
         model = ScriptedModel(done())
         self.run_with(model)
+        names = [t["name"] for t in model.requests[0]["tools"]]
+        self.assertEqual(names, ["delegate_task"] + [t["name"] for t in agent.ALL_TOOLS])
+
+    def test_read_only_session_gives_the_orchestrator_read_tools_only(self):
+        model = ScriptedModel(done())
+        self.run_with(model, mode=permissions.READ_ONLY)
         names = {t["name"] for t in model.requests[0]["tools"]}
-        self.assertEqual(names, {"delegate_task", "todo_write", "memory_read", "memory_write"})
+        self.assertIn("read_file", names)
+        self.assertFalse({"write_file", "edit_file"} & names)
+
+    def test_own_write_runs_before_the_batch(self):
+        order = []
+        self.patch(dispatch, "run_agent", lambda text, **kw: (order.append("executor"), executor(text, **kw)))
+        self.file_handler("write_file", lambda args: (order.append("write"), '{"ok": true}')[1])
+        model = ScriptedModel(
+            reply(delegate("a", "check it"), ToolCall("w", "write_file", {"path": "cli.py", "content": "x"})),
+            done(),
+        )
+        self.run_with(model)
+        self.assertEqual(order, ["write", "executor"])
+        self.assertEqual(model.results_seen(1)[1], '{"ok": true}')
+
+    def test_ask_goes_to_the_approver_and_a_denial_reaches_the_model(self):
+        asked = []
+        approver = mock.Mock(approve=lambda name, args, reason: (asked.append(args["command"]), False)[1])
+        model = ScriptedModel(reply(ToolCall("x", "run_bash_command", {"command": "pip install requests"})), done())
+        self.run_with(model, approver=approver)
+        self.assertEqual(asked, ["pip install requests"])
+        self.assertEqual(self.bash_runs, [])
+        self.assertIn("User denied", model.results_seen(1)[0])
+
+    def test_approved_command_runs(self):
+        approver = mock.Mock(approve=lambda name, args, reason: True)
+        model = ScriptedModel(reply(ToolCall("x", "run_bash_command", {"command": "pip install requests"})), done())
+        self.run_with(model, approver=approver)
+        self.assertEqual(self.bash_runs, ["pip install requests"])
+
+    def test_without_an_approver_asks_are_refused(self):
+        model = ScriptedModel(reply(ToolCall("x", "run_bash_command", {"command": "pip install requests"})), done())
+        self.run_with(model)
+        self.assertEqual(self.bash_runs, [])
+        self.assertIn("User denied", model.results_seen(1)[0])
+
+    def test_read_only_session_refuses_the_orchestrators_own_write(self):
+        written = []
+        self.file_handler("write_file", lambda args: written.append(args) or '{"ok": true}')
+        model = ScriptedModel(reply(ToolCall("w", "write_file", {"path": "cli.py", "content": "x"})), done())
+        self.run_with(model, mode=permissions.READ_ONLY)
+        self.assertEqual(written, [])
+        self.assertIn("Refused", model.results_seen(1)[0])
 
     def test_read_only_session_offers_only_read_and_refuses_write(self):
         model = ScriptedModel(reply(delegate("a", "fix it", lane="write", scope=["cli.py"])), done())
@@ -164,13 +221,13 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_unknown_and_unparseable_calls_get_errors(self):
         model = ScriptedModel(
-            reply(ToolCall("x", "run_bash_command", {"command": "rm -rf ."}),
+            reply(ToolCall("x", "launch_rockets", {}),
                   ToolCall("y", "todo_write", {}, raw={"args_parse_error": "bad", "raw_arguments": "{"})),
             done(),
         )
         self.run_with(model)
-        bash, broken = model.results_seen(1)
-        self.assertIn("Unknown tool: run_bash_command", bash)
+        unknown, broken = model.results_seen(1)
+        self.assertIn("Unknown tool: launch_rockets", unknown)
         self.assertIn("Could not parse", broken)
 
     def test_turn_cap_stops_a_looping_orchestrator(self):

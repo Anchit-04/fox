@@ -11,7 +11,7 @@ TERMINAL = {"done", "failed", "cancelled", "escalated"}
 def analyze(state: dict) -> dict:
     lanes, last, running = {}, {}, set()
     max_readers, writer_overlaps = 0, []
-    audits, proposals, claimed = [], [], set()
+    audits, proposals, claimed, own_writes = [], [], set(), set()
     for turn in state["turns"]:
         kind, p = turn["type"], turn["payload"]
         tid = p.get("task_id")
@@ -32,12 +32,16 @@ def analyze(state: dict) -> dict:
             audits.append(p)
         elif kind == "proposal_made":
             proposals.append((tid, p["text"]))
+        elif kind == "tool_call" and tid is None and p.get("name") in ("write_file", "edit_file"):
+            path = (p.get("args") or {}).get("path")
+            if path:
+                own_writes.add(path.replace("\\", "/").removeprefix("./"))
         elif kind == "tool_result" and tid is None and p.get("name") == "delegate_task":
             for match in re.finditer(r"\| changed ([^|]+)", p.get("content") or ""):
                 claimed.update(f.strip() for f in match.group(1).split(","))
     return {
         "lanes": lanes, "last": last, "max_readers": max_readers, "writer_overlaps": writer_overlaps,
-        "audits": audits, "proposals": proposals, "claimed": claimed,
+        "audits": audits, "proposals": proposals, "claimed": claimed, "own_writes": own_writes,
         "readers": sum(1 for lane in lanes.values() if lane == "read"),
     }
 
@@ -85,13 +89,15 @@ def main() -> None:
     for a in mispredicted:
         print(f"  {a['task_id']} declared {a['declared']} but wrote {a['undeclared']}")
     print(f"  proposals: {r['proposals'] or 'none'}")
+    print(f"  written by the orchestrator itself: {sorted(r['own_writes']) or 'none'}")
     if args.fixture:
         on_disk = git_changed(args.fixture)
         seen = {w for a in r["audits"] for w in a["written"]}
+        accounted = r["claimed"] | r["own_writes"]
         print(f"  changed on disk (git):     {sorted(on_disk)}")
         print(f"  claimed in reports:        {sorted(r['claimed'])}")
         print(f"  seen by the audit:         {sorted(seen)}")
-        print(f"  on disk but never claimed: {sorted(on_disk - r['claimed']) or 'none'}")
+        print(f"  on disk but never claimed: {sorted(on_disk - accounted) or 'none'}")
         print(f"  claimed but not on disk:   {sorted(r['claimed'] - on_disk) or 'none'}")
     sys.exit(1 if failed else 0)
 

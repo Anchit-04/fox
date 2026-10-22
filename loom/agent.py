@@ -128,6 +128,11 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
+def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
+    return (name == "run_bash_command" or name in FILE_TOOL_HANDLERS or name in TODO_TOOL_HANDLERS
+            or name in memory.MEMORY_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
+
+
 def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
                   extra_handlers: dict | None = None, event_sink: "EventSink | None" = None,
                   task_id: str | None = None, verbose: bool = False) -> str:
@@ -141,6 +146,8 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
                      f"Raw arguments received: {raw_args[:300]!r}. "
                      "Retry the call with valid JSON arguments."
         })
+    if not _is_known_tool(tc.name, extra_handlers):
+        return json.dumps({"error": f"Unknown tool: {tc.name}"})
     decision = permissions.classify(tc.name, args, mode)
     if decision.action == permissions.ALLOW:
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)

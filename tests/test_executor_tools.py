@@ -213,6 +213,15 @@ class RunAgentHooks(unittest.TestCase):
             agent.run_agent("task", verbose=False, interactive=False, mem=self.mem)
         self.assertEqual(seen[1][1].raw, ["provider-blocks"])
 
+    def test_unknown_tool_is_rejected_without_asking_anyone(self):
+        asked, events = [], []
+        approver = mock.Mock(approve=lambda *a: asked.append(a) or True)
+        self.run_with([call("launch_rockets", {}), ProviderResponse(text="ok", tool_calls=[])],
+                      approver=approver, event_sink=lambda e, p: events.append((e, p)))
+        self.assertEqual(asked, [])
+        [result] = [p["content"] for e, p in events if e == "tool_result"]
+        self.assertIn("Unknown tool: launch_rockets", result)
+
     def test_extra_handlers_take_priority(self):
         seen = []
         self.run_with([call("memory_read", {"entry_id": "x"}), ProviderResponse(text="ok", tool_calls=[])],
