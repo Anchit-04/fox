@@ -26,6 +26,12 @@ MODEL_REGISTRY = {
         "env_key": "ANTHROPIC_API_KEY",
         "tier": "cheap",
     },
+    "gemini-lite": {
+        "provider": GeminiProvider,
+        "model_id": "gemini-3.1-flash-lite",
+        "env_key": "GEMINI_API_KEY",
+        "tier": "cheap",
+    },
     "gemini-flash": {
         "provider": GeminiProvider,
         "model_id": "gemini-3.8-flash",  # was 3.6-flash — that id started returning 503 "high demand"; 3.8 is current-gen and on the same key
@@ -78,6 +84,20 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "cheap",
+    },
+    "nemotron-ultra": {
+        "provider": OpenAICompatibleProvider,
+        "model_id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "env_key": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+        "tier": "strong",
+    },
+    "nemotron-super": {
+        "provider": OpenAICompatibleProvider,
+        "model_id": "nvidia/nemotron-3.5-super-vl:free",
+        "env_key": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+        "tier": "strong",
     },
 }
 
