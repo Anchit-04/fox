@@ -10,7 +10,7 @@ non-Anthropic providers speak this dialect.
 import json
 import time
 
-from openai import OpenAI, RateLimitError
+from openai import InternalServerError, OpenAI, RateLimitError
 
 from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
@@ -58,14 +58,29 @@ class OpenAICompatibleProvider(Provider):
 
     def _create_with_retry(self, **kwargs):
         for attempt in range(MAX_RETRIES):
+            wait = 2 ** attempt
+            last = attempt == MAX_RETRIES - 1
             try:
-                return self._client.chat.completions.create(**kwargs)
-            except RateLimitError:
-                wait = 2 ** attempt
-                if attempt == MAX_RETRIES - 1:
+                response = self._client.chat.completions.create(**kwargs)
+            except (RateLimitError, InternalServerError) as e:
+                if last:
                     raise
-                print(f"\033[91mRate limited, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
+                reason = "Rate limited" if isinstance(e, RateLimitError) else f"Server error ({e.status_code})"
+                print(f"\033[91m{reason}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
                 time.sleep(wait)
+                continue
+            if response.choices or not _is_transient(response) or last:
+                return response
+            print(f"\033[91mProvider overloaded, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
+            time.sleep(wait)
+
+
+TRANSIENT_CODES = {429, 502, 503}
+
+
+def _is_transient(response) -> bool:
+    error = getattr(response, "error", None)
+    return isinstance(error, dict) and error.get("code") in TRANSIENT_CODES
 
 
 def _to_openai_messages(history: list) -> list:

@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import httpx
+import openai
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
 from providers.base import REQUEST_TIMEOUT_SECONDS, ToolCall, ToolResult, Turn
@@ -45,15 +48,47 @@ class EmptyCompletion(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.provider = OpenAICompatibleProvider("some/model", "FAKE_KEY", "https://example.invalid/v1")
+        sleeper = mock.patch("providers.openai_compatible.time.sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
 
-    def generate_with(self, response):
-        with mock.patch.object(self.provider._client.chat.completions, "create", return_value=response):
-            return self.provider.generate([], [], "system")
+    def generate_with(self, *responses):
+        with mock.patch.object(self.provider._client.chat.completions, "create", side_effect=list(responses)) as create:
+            try:
+                return self.provider.generate([], [], "system")
+            finally:
+                self.calls = create.call_count
+
+    def test_overloaded_provider_is_retried(self):
+        overloaded = SimpleNamespace(choices=None, error={"message": "Service temporarily overloaded", "code": 503})
+        message = SimpleNamespace(content="hi", tool_calls=None)
+        result = self.generate_with(overloaded, overloaded, SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+        self.assertEqual((result.text, self.calls), ("hi", 3))
+
+    def test_overload_that_never_clears_still_raises(self):
+        overloaded = SimpleNamespace(choices=None, error={"message": "Service temporarily overloaded", "code": 503})
+        with self.assertRaises(RuntimeError) as ctx:
+            self.generate_with(*[overloaded] * 5)
+        self.assertIn("overloaded", str(ctx.exception))
+        self.assertEqual(self.calls, 5)
+
+    def test_server_error_is_retried(self):
+        request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        error = openai.InternalServerError("Provider returned error", response=httpx.Response(502, request=request),
+                                           body=None)
+        message = SimpleNamespace(content="hi", tool_calls=None)
+        result = self.generate_with(error, SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+        self.assertEqual((result.text, self.calls), ("hi", 2))
+
+    def test_permanent_error_is_not_retried(self):
+        with self.assertRaises(RuntimeError):
+            self.generate_with(SimpleNamespace(choices=None, error={"message": "bad request", "code": 400}))
+        self.assertEqual(self.calls, 1)
 
     def test_null_choices_raise_a_readable_error(self):
         upstream = {"message": "Provider returned error", "code": 502}
         with self.assertRaises(RuntimeError) as ctx:
-            self.generate_with(SimpleNamespace(choices=None, error=upstream))
+            self.generate_with(*[SimpleNamespace(choices=None, error=upstream)] * 5)
         self.assertIn("some/model", str(ctx.exception))
         self.assertIn("Provider returned error", str(ctx.exception))
 
