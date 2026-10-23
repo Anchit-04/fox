@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
 import agent
+import context
 import memory
 import permissions
 from injection import InjectionQueue
@@ -237,18 +238,26 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("error", [e for e, _ in self.events])
 
     def test_compaction_keeps_every_task(self):
-        self.patch(orch, "COMPACT_EVERY", 2)
         model = ScriptedModel(
             reply(delegate("a", "first")),
             reply(delegate("b", "second")),
             done(),
         )
+        sizes = iter([10, 10**9])
+        self.patch(context, "history_chars", lambda history: next(sizes))
         self.run_with(model)
         [only] = model.requests[2]["history"]
         self.assertEqual(only.role, "user")
         self.assertIn("Every task so far", only.text)
         self.assertIn("t1 [read] done", only.text)
         self.assertIn("t2 [read] done", only.text)
+
+    def test_a_small_history_is_never_compacted_however_many_turns(self):
+        steps = [reply(ToolCall(f"r{i}", "todo_write", {"todos": []})) for i in range(15)]
+        model = ScriptedModel(*steps, done())
+        self.run_with(model)
+        self.assertEqual(model.requests[-1]["history"][0].text, "add a --verbose flag")
+        self.assertEqual(len(model.requests[-1]["history"]), 31)
 
     def test_injected_message_reaches_the_orchestrator(self):
         queue = InjectionQueue()

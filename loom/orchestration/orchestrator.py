@@ -6,7 +6,8 @@ import permissions
 from agent import ALL_TOOLS, IDENTITY, _emit, run_tool_call
 from approval import DenyApprover
 from config import preferences, routing
-from context import COMPACT_EVERY, MAX_ITERATIONS, build_compact_input
+import context
+from context import MAX_ITERATIONS, build_compact_input
 from injection import InjectionQueue
 from orchestration.dispatch import run_batch
 from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
@@ -221,12 +222,11 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
         history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
         results = _run_turn(response.tool_calls, run)
 
-        if turns % COMPACT_EVERY == 0:
+        history.append(Turn(role="user", tool_results=results))
+        if context.should_compact(history):
             summary = build_compact_input(task, run.todo.render(),
                                           [{"name": r.name, "content": r.content} for r in results])
             history = [Turn(role="user", text=f"{summary}\n\nEvery task so far:\n{_ledger(run.registry)}")]
-        else:
-            history.append(Turn(role="user", tool_results=results))
 
     file_tools.clear_approved_paths()
     return final_text

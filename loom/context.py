@@ -3,12 +3,27 @@ Context management: nothing truncates the growing turn history on its own,
 so we periodically replace it with a compact summary instead. Safe because
 todo_write already externalizes the one thing that matters — progress.
 
-COMPACT_EVERY: soft reset (smaller context, task keeps going).
+COMPACT_AT_CHARS: soft reset (smaller context, task keeps going).
 MAX_ITERATIONS: hard stop, so a looping agent can't run forever.
 """
 
+import json
+
 MAX_ITERATIONS = 30
-COMPACT_EVERY = 12
+COMPACT_AT_CHARS = 600_000
+
+
+def history_chars(history: list) -> int:
+    total = 0
+    for turn in history:
+        total += len(turn.text or "")
+        total += sum(len(json.dumps(tc.args)) for tc in turn.tool_calls)
+        total += sum(len(tr.content) for tr in turn.tool_results)
+    return total
+
+
+def should_compact(history: list) -> bool:
+    return history_chars(history) >= COMPACT_AT_CHARS
 
 
 def build_compact_input(original_task: str, todo_checklist: str, recent_results: list) -> str:

@@ -18,7 +18,8 @@ from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
-from context import MAX_ITERATIONS, COMPACT_EVERY, build_compact_input
+import context
+from context import MAX_ITERATIONS, build_compact_input
 from providers import get_provider, Turn, ToolResult
 from sandbox.sandbox_client import run_bash_command
 import memory
@@ -291,15 +292,14 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
         if stop_when is not None and stop_when():
             break
 
-        if turn_count % COMPACT_EVERY == 0:
+        history.append(Turn(role="user", tool_results=tool_results))
+        if context.should_compact(history):
             # Drop the raw history, replace it with a summary — the todo list
             # already externalizes progress, so nothing essential is lost.
             if verbose:
                 print(f"\033[95m[context] Compacting after {turn_count} turns — replacing history with a summary.\033[0m")
             compact_text = build_compact_input(task, todo_manager.render(), executed_results)
             history = [Turn(role="user", text=compact_text)]
-        else:
-            history.append(Turn(role="user", tool_results=tool_results))
 
     # Grants are per-run, not per-thread-lifetime: executor threads are created
     # per batch but nothing guarantees they aren't reused, and a later run must
