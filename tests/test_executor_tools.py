@@ -222,6 +222,22 @@ class RunAgentHooks(unittest.TestCase):
         [result] = [p["content"] for e, p in events if e == "tool_result"]
         self.assertIn("Unknown tool: launch_rockets", result)
 
+    def test_write_to_a_file_claimed_by_another_task_is_refused_without_asking(self):
+        from orchestration.claims import FileClaims
+        claims = FileClaims()
+        claims.claim("t2", ["docs/api.md"])
+        asked, written = [], []
+        approver = mock.Mock(approve=lambda *a: asked.append(a) or True)
+        with mock.patch.dict(agent.FILE_TOOL_HANDLERS, {"write_file": lambda args: written.append(args) or "{}"}):
+            for task_id, path in (("t1", "docs/api.md"), ("t2", "./docs/api.md"), ("t1", "other.md")):
+                result = agent.run_tool_call(ToolCall(id="c", name="write_file", args={"path": path, "content": "x"}),
+                                             mode=permissions.FULL_ACCESS, approver=approver, model_key="m",
+                                             todo_manager=None, mem=self.mem, task_id=task_id, claims=claims)
+                if task_id == "t1" and path == "docs/api.md":
+                    self.assertIn("claimed by t2", result)
+        self.assertEqual([w["path"] for w in written], ["./docs/api.md", "other.md"])
+        self.assertEqual(asked, [])
+
     def test_extra_handlers_take_priority(self):
         seen = []
         self.run_with([call("memory_read", {"entry_id": "x"}), ProviderResponse(text="ok", tool_calls=[])],

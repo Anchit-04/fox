@@ -32,7 +32,6 @@ class ReadLane(unittest.TestCase):
             with self.subTest(mode=mode):
                 a = admit(task(Lane.READ), mode)
                 self.assertEqual(a.mode, RO)
-                self.assertFalse(a.needs_writer_slot)
 
     def test_reader_gets_no_write_tools(self):
         got = names(admit(task(Lane.READ), WW).tools(real_tools()))
@@ -55,12 +54,10 @@ class ReadLane(unittest.TestCase):
 
 
 class WriteLane(unittest.TestCase):
-    def test_writer_takes_the_session_mode_and_the_slot(self):
+    def test_writer_takes_the_session_mode(self):
         for mode in (WW, FA):
             with self.subTest(mode=mode):
-                a = admit(task(Lane.WRITE), mode)
-                self.assertEqual(a.mode, mode)
-                self.assertTrue(a.needs_writer_slot)
+                self.assertEqual(admit(task(Lane.WRITE), mode).mode, mode)
 
     def test_writer_gets_every_tool(self):
         tools = real_tools()
@@ -87,7 +84,7 @@ class Admission(unittest.TestCase):
     def test_admission_is_frozen(self):
         a = admit(task(Lane.WRITE), WW)
         with self.assertRaises(AttributeError):
-            a.needs_writer_slot = False
+            a.mode = FA
 
 
 class LaneFromProposal(unittest.TestCase):

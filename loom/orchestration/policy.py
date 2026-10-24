@@ -18,7 +18,6 @@ class PolicyRefusal(Exception):
 class Admission:
     lane: Lane
     mode: str
-    needs_writer_slot: bool
 
     def tools(self, all_tools: list[dict]) -> list[dict]:
         if self.lane is Lane.READ:
@@ -35,11 +34,11 @@ def admit(task: Task, session_mode: str) -> Admission:
         raise ValueError(f"unknown session mode {session_mode!r}; expected one of {permissions.MODES}")
 
     if task.lane is Lane.READ:
-        return Admission(lane=Lane.READ, mode=permissions.READ_ONLY, needs_writer_slot=False)
+        return Admission(lane=Lane.READ, mode=permissions.READ_ONLY)
 
     if session_mode == permissions.READ_ONLY:
         raise PolicyRefusal(
             f"{task.id} refused: this session is read-only. Re-plan it as a read "
             "task, or ask the user to switch the session to a writable mode."
         )
-    return Admission(lane=Lane.WRITE, mode=session_mode, needs_writer_slot=True)
+    return Admission(lane=Lane.WRITE, mode=session_mode)

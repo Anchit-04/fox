@@ -6,7 +6,7 @@ from enum import Enum
 
 class Lane(Enum):
     READ = "read"     # never modifies anything; runs in parallel with other readers
-    WRITE = "write"   # may modify; needs the single writer slot
+    WRITE = "write"   # may modify; claims the files in its scope while it runs
 
 
 class TaskStatus(Enum):
@@ -92,8 +92,8 @@ class Task:
 class TaskRegistry:
     """One per orchestrator run. Hands out ids and looks tasks up.
 
-    Tasks are only created from the orchestrator's own thread, between
-    batches, so the counter needs no lock."""
+    Tasks are only created from the orchestrator's own thread, so the
+    counter needs no lock."""
 
     def __init__(self):
         self._tasks: dict[str, Task] = {}

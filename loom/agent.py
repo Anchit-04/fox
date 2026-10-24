@@ -134,9 +134,25 @@ def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
             or name in memory.MEMORY_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
 
 
+CLAIMED_TOOLS = frozenset({"write_file", "edit_file"})
+
+
+def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
+    if claims is None or tc.name not in CLAIMED_TOOLS:
+        return None
+    path = tc.args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    owner = claims.owner(path)
+    if owner is None or owner == task_id:
+        return None
+    return json.dumps({"error": f"{path} is claimed by {owner}, which is still running. "
+                                "Leave that file to it, or wait for it to finish."})
+
+
 def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
                   extra_handlers: dict | None = None, event_sink: "EventSink | None" = None,
-                  task_id: str | None = None, verbose: bool = False) -> str:
+                  task_id: str | None = None, verbose: bool = False, claims=None) -> str:
     args = tc.args
     if tc.raw and tc.raw.get("args_parse_error"):
         # Adapter couldn't parse this call's JSON args — don't execute
@@ -149,6 +165,9 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         })
     if not _is_known_tool(tc.name, extra_handlers):
         return json.dumps({"error": f"Unknown tool: {tc.name}"})
+    refusal = _claimed_by_another(tc, claims, task_id)
+    if refusal is not None:
+        return refusal
     decision = permissions.classify(tc.name, args, mode)
     if decision.action == permissions.ALLOW:
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
@@ -188,7 +207,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
               mode: str = permissions.WORKSPACE_WRITE, approver=None,
               tools: list[dict] | None = None, extra_handlers: dict | None = None,
-              stop_when: Callable[[], bool] | None = None) -> str:
+              stop_when: Callable[[], bool] | None = None, claims=None) -> str:
     """mode is the sandbox axis (read-only / workspace-write / full-access);
     `approver` is the approval axis — who gets asked when policy says ASK.
     They're independent on purpose: see permissions.py.
@@ -203,7 +222,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     all defaulted so the plain CLI still works unchanged). keep_alive=True is
     for a live top-level chat session only — never set it for a delegated
     executor task, or it'll block forever waiting for input nobody's going to
-    send, and its whole batch with it: run_batch joins every executor thread."""
+    send, and the orchestrator with it: it waits for every running task."""
     provider = get_provider(model_key)
     # Start from no grants, whatever happened on this thread before. Clearing
     # only on the way out would miss a run that raised, and two sequential
@@ -274,7 +293,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
 
             result = run_tool_call(tc, mode=mode, approver=approver, model_key=model_key,
                                    todo_manager=todo_manager, mem=mem, extra_handlers=extra_handlers,
-                                   event_sink=event_sink, task_id=task_id, verbose=verbose)
+                                   event_sink=event_sink, task_id=task_id, verbose=verbose, claims=claims)
 
             if verbose:
                 if tc.name == "todo_write":

@@ -45,7 +45,7 @@ ASK_ORCHESTRATOR_TOOL = {
     "description": (
         "Propose work that is outside your task, such as a bug you noticed elsewhere or a file "
         "that also needs changing. Do not do that work yourself. The orchestrator reads proposals "
-        "after your batch finishes and decides what to do. You get no answer now: carry on with "
+        "when your task finishes and decides what to do. You get no answer now: carry on with "
         "your own task."
     ),
     "parameters": {

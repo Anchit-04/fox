@@ -1,6 +1,8 @@
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -30,6 +32,18 @@ def done(text="All done."):
     return ProviderResponse(text=text, tool_calls=[])
 
 
+def wait(call_id="w"):
+    return reply(ToolCall(call_id, "wait_for_tasks", {}))
+
+
+def seen(request) -> str:
+    parts = []
+    for turn in request["history"]:
+        parts.append(turn.text or "")
+        parts.extend(r.content for r in turn.tool_results)
+    return "\n".join(parts)
+
+
 class ScriptedModel:
     def __init__(self, *responses, forever=None, limit=100):
         self.responses = list(responses)
@@ -42,11 +56,13 @@ class ScriptedModel:
             raise RuntimeError(f"orchestrator called the model more than {self.limit} times")
         self.requests.append({"history": list(history), "tools": tools, "prompt": system_prompt})
         if self.responses:
-            return self.responses.pop(0)
+            response = self.responses.pop(0)
+            return response() if callable(response) else response
         return self.forever() if self.forever else done("(script exhausted)")
 
     def results_seen(self, n):
-        return [r.content for r in self.requests[n]["history"][-1].tool_results]
+        [*_, last] = [t for t in self.requests[n]["history"] if t.tool_results]
+        return [r.content for r in last.tool_results]
 
 
 def executor(text, **kw):
@@ -86,6 +102,10 @@ class OrchestratorTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def task_status(self, task_id):
+        statuses = [p["status"] for e, p in self.events if e == "task_status_changed" and p["task_id"] == task_id]
+        return statuses[-1] if statuses else None
+
     def run_with(self, model, mode=permissions.WORKSPACE_WRITE, **kw):
         self.patch(orch, "get_provider", lambda key: model)
         kw.setdefault("model_key", "claude-opus")
@@ -95,62 +115,81 @@ class OrchestratorTests(unittest.TestCase):
     def test_dependency_flows_through_the_conversation(self):
         model = ScriptedModel(
             reply(delegate("a", "find the env loader")),
+            wait("w1"),
             reply(delegate("b", "add --verbose using what t1 found", lane="write", scope=["cli.py"])),
+            wait("w2"),
             done("Added --verbose."),
         )
         final = self.run_with(model)
         self.assertEqual(final, "Added --verbose.")
-        self.assertEqual(model.results_seen(1), ["t1 [read] done: finished: find the env loader"])
-        self.assertEqual(model.results_seen(2),
-                         ["t2 [write] done: finished: add --verbose using what t1 found | changed cli.py"])
+        self.assertIn("[task finished] t1 [read] done: finished: find the env loader", seen(model.requests[2]))
+        self.assertIn("[task finished] t2 [write] done: finished: add --verbose using what t1 found | changed cli.py",
+                      seen(model.requests[4]))
 
-    def test_one_reply_is_one_batch_and_ids_continue(self):
-        batches = []
-        real = orch.run_batch
+    def test_delegate_returns_at_once_with_the_task_id(self):
+        model = ScriptedModel(reply(delegate("a", "one"), delegate("b", "two")), wait(), wait("w2"), done())
+        self.run_with(model)
+        first, second = model.results_seen(1)
+        self.assertTrue(first.startswith("t1 started [read]"))
+        self.assertTrue(second.startswith("t2 started [read]"))
 
-        def counting_run_batch(tasks, *a, **k):
-            batches.append([t.id for t in tasks])
-            return real(tasks, *a, **k)
+    def test_orchestrator_keeps_working_while_a_task_runs(self):
+        gate = threading.Event()
+        statuses = []
 
-        self.patch(orch, "run_batch", counting_run_batch)
+        def slow(text, **kw):
+            gate.wait(5)
+            executor(text, **kw)
+
+        def own_write(args):
+            statuses.append(self.task_status("t1"))
+            gate.set()
+            return '{"success": true}'
+
+        self.patch(dispatch, "run_agent", slow)
+        self.file_handler("write_file", own_write)
         model = ScriptedModel(
-            reply(delegate("a", "one"), delegate("b", "two")),
-            reply(delegate("c", "three")),
+            reply(delegate("a", "write the docs", lane="write", scope=["docs.md"])),
+            reply(ToolCall("w", "write_file", {"path": "cli.py", "content": "x"})),
+            wait(),
             done(),
         )
         self.run_with(model)
-        self.assertEqual(batches, [["t1", "t2"], ["t3"]])
+        self.assertEqual(statuses, ["running"])
+        self.assertIn("[task finished] t1 [write] done", seen(model.requests[3]))
 
     def test_results_come_back_in_call_order(self):
         model = ScriptedModel(
             reply(delegate("a", "first"),
                   ToolCall("m", "memory_write", {"content": "note"}),
                   delegate("b", "second")),
+            wait(), wait("w2"),
             done(),
         )
         self.run_with(model)
-        results = model.requests[1]["history"][-1].tool_results
+        [results] = [t.tool_results for t in model.requests[1]["history"] if t.tool_results]
         self.assertEqual([r.call_id for r in results], ["a", "m", "b"])
         self.assertTrue(results[0].content.startswith("t1 "))
         self.assertEqual(json.loads(results[1].content), {"ok": True, "id": "note_1"})
         self.assertTrue(results[2].content.startswith("t2 "))
 
-    def test_memory_note_lands_before_the_batch_runs(self):
-        seen = []
+    def test_calls_run_in_order_so_a_note_written_first_reaches_the_task(self):
+        notes = []
         self.patch(dispatch, "run_agent",
-                   lambda text, **kw: (seen.append("note_1" in kw["mem"].read_index()), executor(text, **kw)))
+                   lambda text, **kw: (notes.append("note_1" in kw["mem"].read_index()), executor(text, **kw)))
         model = ScriptedModel(
-            reply(delegate("a", "use the note"), ToolCall("m", "memory_write", {"content": "use argparse"})),
+            reply(ToolCall("m", "memory_write", {"content": "use argparse"}), delegate("a", "use the note")),
+            wait(),
             done(),
         )
         self.run_with(model)
-        self.assertEqual(seen, [True])
+        self.assertEqual(notes, [True])
 
     def test_orchestrator_gets_every_tool_plus_delegation(self):
         model = ScriptedModel(done())
         self.run_with(model)
         names = [t["name"] for t in model.requests[0]["tools"]]
-        self.assertEqual(names, ["delegate_task"] + [t["name"] for t in agent.ALL_TOOLS])
+        self.assertEqual(names, ["delegate_task", "wait_for_tasks"] + [t["name"] for t in agent.ALL_TOOLS])
 
     def test_read_only_session_gives_the_orchestrator_read_tools_only(self):
         model = ScriptedModel(done())
@@ -159,17 +198,124 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertFalse({"write_file", "edit_file"} & names)
 
-    def test_own_write_runs_before_the_batch(self):
-        order = []
-        self.patch(dispatch, "run_agent", lambda text, **kw: (order.append("executor"), executor(text, **kw)))
-        self.file_handler("write_file", lambda args: (order.append("write"), '{"ok": true}')[1])
+    def test_orchestrator_cannot_write_a_claimed_file_until_the_task_finishes(self):
+        gate = threading.Event()
+        written = []
+
+        def slow(text, **kw):
+            gate.wait(5)
+            executor(text, **kw)
+
+        def release():
+            gate.set()
+            return wait()
+
+        self.patch(dispatch, "run_agent", slow)
+        self.file_handler("write_file", lambda args: written.append(args["path"]) or '{"success": true}')
+        write_docs = ToolCall("x", "write_file", {"path": "./docs.md", "content": "x"})
         model = ScriptedModel(
-            reply(delegate("a", "check it"), ToolCall("w", "write_file", {"path": "cli.py", "content": "x"})),
+            reply(delegate("a", "write the docs", lane="write", scope=["docs.md"]), write_docs),
+            release,
+            reply(ToolCall("y", "write_file", {"path": "docs.md", "content": "y"})),
             done(),
         )
         self.run_with(model)
-        self.assertEqual(order, ["write", "executor"])
-        self.assertEqual(model.results_seen(1)[1], '{"ok": true}')
+        self.assertIn("claimed by t1", model.results_seen(1)[1])
+        self.assertEqual(written, ["docs.md"])
+
+    def test_overlapping_write_task_is_not_started(self):
+        gate = threading.Event()
+
+        def slow(text, **kw):
+            gate.wait(5)
+            executor(text, **kw)
+
+        def release():
+            gate.set()
+            return wait()
+
+        self.patch(dispatch, "run_agent", slow)
+        model = ScriptedModel(
+            reply(delegate("a", "docs", lane="write", scope=["docs.md"]),
+                  delegate("b", "more docs", lane="write", scope=["docs.md", "api.md"])),
+            release,
+            done(),
+        )
+        self.run_with(model)
+        first, second = model.results_seen(1)
+        self.assertTrue(first.startswith("t1 started"))
+        self.assertIn("t2 not started: docs.md already claimed", second)
+        self.assertEqual(self.task_status("t2"), "failed")
+
+    def test_a_finished_task_reaches_the_next_turn_without_waiting(self):
+        delivered = threading.Event()
+        real_put = dispatch.TaskInbox.put
+
+        def put(inbox, finished):
+            real_put(inbox, finished)
+            delivered.set()
+
+        self.patch(dispatch.TaskInbox, "put", put)
+
+        def busy_until_t1_is_in_the_inbox():
+            delivered.wait(5)
+            return reply(ToolCall("t", "todo_write", {"todos": []}))
+
+        model = ScriptedModel(reply(delegate("a", "look")), busy_until_t1_is_in_the_inbox, done())
+        self.run_with(model)
+        self.assertIn("[task finished] t1 [read] done", seen(model.requests[2]))
+        self.assertNotIn("wait_for_tasks", [tc.name for r in model.requests for t in r["history"] for tc in t.tool_calls])
+
+    def test_wait_with_nothing_running_returns_at_once(self):
+        model = ScriptedModel(wait(), done())
+        self.run_with(model)
+        self.assertEqual(model.results_seen(1), ["No tasks are running."])
+
+    def test_finishing_while_tasks_run_waits_and_asks_again(self):
+        def slow(text, **kw):
+            time.sleep(0.3)
+            executor(text, **kw)
+
+        self.patch(dispatch, "run_agent", slow)
+        model = ScriptedModel(reply(delegate("a", "look around")), done("premature"), done("final"))
+        final = self.run_with(model)
+        self.assertEqual(final, "final")
+        text = seen(model.requests[2])
+        self.assertIn("[task finished] t1 [read] done", text)
+        self.assertIn("cannot finish yet", text)
+
+    def test_running_tasks_are_waited_for_when_the_turn_cap_hits(self):
+        def slow(text, **kw):
+            time.sleep(0.2)
+            executor(text, **kw)
+
+        self.patch(dispatch, "run_agent", slow)
+        self.patch(orch, "MAX_ITERATIONS", 2)
+        model = ScriptedModel(reply(delegate("a", "slow")),
+                              forever=lambda: reply(ToolCall("t", "todo_write", {"todos": []})))
+        self.run_with(model)
+        self.assertEqual(self.task_status("t1"), "done")
+
+    def test_running_tasks_are_waited_for_when_the_model_crashes(self):
+        def slow(text, **kw):
+            time.sleep(0.2)
+            executor(text, **kw)
+
+        def crash():
+            raise RuntimeError("provider down")
+
+        self.patch(dispatch, "run_agent", slow)
+        model = ScriptedModel(reply(delegate("a", "slow")), crash)
+        with self.assertRaises(RuntimeError):
+            self.run_with(model)
+        self.assertEqual(self.task_status("t1"), "done")
+
+    def test_delivered_results_are_logged_as_an_event(self):
+        model = ScriptedModel(reply(delegate("a", "look")), wait(), done())
+        self.run_with(model)
+        delivered = [p["content"] for e, p in self.events if e == "task_results_delivered"]
+        waited = [p["content"] for e, p in self.events if e == "tool_result" and p["name"] == "wait_for_tasks"]
+        self.assertIn("[task finished] t1 [read] done", "\n".join(delivered + waited))
 
     def test_ask_goes_to_the_approver_and_a_denial_reaches_the_model(self):
         asked = []
@@ -201,24 +347,25 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("Refused", model.results_seen(1)[0])
 
     def test_read_only_session_offers_only_read_and_refuses_write(self):
-        model = ScriptedModel(reply(delegate("a", "fix it", lane="write", scope=["cli.py"])), done())
+        model = ScriptedModel(reply(delegate("a", "fix it", lane="write", scope=["cli.py"])), wait(), done())
         self.run_with(model, mode=permissions.READ_ONLY)
         [tool] = [t for t in model.requests[0]["tools"] if t["name"] == "delegate_task"]
         self.assertEqual(tool["parameters"]["properties"]["lane"]["enum"], ["read"])
         self.assertIn("read-only", model.requests[0]["prompt"])
-        [result] = model.results_seen(1)
-        self.assertTrue(result.startswith("t1 [write] failed: t1 refused"))
+        self.assertIn("[task finished] t1 [write] failed: t1 refused", seen(model.requests[2]))
         self.assertEqual(self.executor_calls, [])
 
     def test_bad_delegation_is_reported_and_the_rest_still_run(self):
         model = ScriptedModel(
             reply(ToolCall("bad", "delegate_task", {"lane": "read"}), delegate("ok", "valid")),
+            wait(),
             done(),
         )
         self.run_with(model)
         bad, ok = model.results_seen(1)
         self.assertIn("Task not created", bad)
-        self.assertTrue(ok.startswith("t1 [read] done"))
+        self.assertTrue(ok.startswith("t1 started"))
+        self.assertIn("[task finished] t1 [read] done", seen(model.requests[2]))
 
     def test_unknown_and_unparseable_calls_get_errors(self):
         model = ScriptedModel(
@@ -240,13 +387,15 @@ class OrchestratorTests(unittest.TestCase):
     def test_compaction_keeps_every_task(self):
         model = ScriptedModel(
             reply(delegate("a", "first")),
+            wait("w1"),
             reply(delegate("b", "second")),
+            wait("w2"),
             done(),
         )
-        sizes = iter([10, 10**9])
+        sizes = iter([10, 10, 10, 10**9])
         self.patch(context, "history_chars", lambda history: next(sizes))
         self.run_with(model)
-        [only] = model.requests[2]["history"]
+        [only] = model.requests[4]["history"]
         self.assertEqual(only.role, "user")
         self.assertIn("Every task so far", only.text)
         self.assertIn("t1 [read] done", only.text)
@@ -268,7 +417,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("[Message from human]: use click, not argparse", texts)
 
     def test_final_text_is_the_last_thing_said(self):
-        model = ScriptedModel(reply(delegate("a", "x"), text="Starting."), done("Finished."))
+        model = ScriptedModel(reply(delegate("a", "x"), text="Starting."), wait(), done("Finished."))
         self.assertEqual(self.run_with(model), "Finished.")
 
     def test_picks_a_strong_model_when_none_is_given(self):
@@ -288,22 +437,26 @@ class OrchestratorTests(unittest.TestCase):
         self.patch(dispatch, "run_agent", executor_that_proposes)
         model = ScriptedModel(
             reply(delegate("a", "look around"), delegate("b", "add the flag", lane="write", scope=["cli.py"])),
+            wait(), wait("w2"),
             done(),
         )
         self.run_with(model)
-        quiet, proposing = model.results_seen(1)
-        self.assertNotIn("proposes", quiet)
-        self.assertTrue(proposing.startswith("t2 [write] done"))
-        self.assertTrue(proposing.endswith("proposes: README documents the old flags; tests/ has no cli tests"))
+        lines = [l for l in seen(model.requests[-1]).splitlines() if l.startswith("[task finished]")]
+        quiet = [l for l in lines if " t1 " in l]
+        proposing = [l for l in lines if " t2 " in l]
+        self.assertEqual(len(quiet), 1)
+        self.assertNotIn("proposes", quiet[0])
+        self.assertEqual(proposing, ["[task finished] t2 [write] done: finished: add the flag | changed cli.py"
+                                     " | proposes: README documents the old flags; tests/ has no cli tests"])
 
     def test_a_failed_task_can_still_propose(self):
         def gives_up(text, **kw):
             kw["extra_handlers"]["ask_orchestrator"]({"proposal": "split this task"})
         self.patch(dispatch, "run_agent", gives_up)
-        model = ScriptedModel(reply(delegate("a", "too big")), done())
+        model = ScriptedModel(reply(delegate("a", "too big")), wait(), done())
         self.run_with(model)
-        [result] = model.results_seen(1)
-        self.assertEqual(result, "t1 [read] failed: ended without calling report | proposes: split this task")
+        self.assertIn("[task finished] t1 [read] failed: ended without calling report | proposes: split this task",
+                      seen(model.requests[2]))
 
     def test_prompt_explains_proposals(self):
         model = ScriptedModel(done())
