@@ -18,7 +18,8 @@ from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
-from context import MAX_ITERATIONS, COMPACT_EVERY, build_compact_input
+import context
+from context import MAX_ITERATIONS, build_compact_input
 from providers import get_provider, Turn, ToolResult
 from sandbox.sandbox_client import run_bash_command
 import memory
@@ -113,7 +114,10 @@ def _emit(event_sink: "EventSink | None", event_type: str, payload: dict) -> Non
 
 # --- Tool execution -----------------------------------------------------------
 
-def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory) -> str:
+def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
+                 extra_handlers: dict | None = None) -> str:
+    if extra_handlers and name in extra_handlers:
+        return extra_handlers[name](args)
     if name == "run_bash_command":
         return run_bash_command(args["command"])
     if name in FILE_TOOL_HANDLERS:
@@ -125,12 +129,85 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
+def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
+    return (name == "run_bash_command" or name in FILE_TOOL_HANDLERS or name in TODO_TOOL_HANDLERS
+            or name in memory.MEMORY_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
+
+
+CLAIMED_TOOLS = frozenset({"write_file", "edit_file"})
+
+
+def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
+    if claims is None or tc.name not in CLAIMED_TOOLS:
+        return None
+    path = tc.args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    owner = claims.owner(path)
+    if owner is None or owner == task_id:
+        return None
+    return json.dumps({"error": f"{path} is claimed by {owner}, which is still running. "
+                                "Leave that file to it, or wait for it to finish."})
+
+
+def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
+                  extra_handlers: dict | None = None, event_sink: "EventSink | None" = None,
+                  task_id: str | None = None, verbose: bool = False, claims=None) -> str:
+    args = tc.args
+    if tc.raw and tc.raw.get("args_parse_error"):
+        # Adapter couldn't parse this call's JSON args — don't execute
+        # with empty/wrong args, hand back a tool-error the model can react to.
+        raw_args = tc.raw.get("raw_arguments", "")
+        return json.dumps({
+            "error": f"Could not parse arguments for {tc.name}: {tc.raw['args_parse_error']}. "
+                     f"Raw arguments received: {raw_args[:300]!r}. "
+                     "Retry the call with valid JSON arguments."
+        })
+    if not _is_known_tool(tc.name, extra_handlers):
+        return json.dumps({"error": f"Unknown tool: {tc.name}"})
+    refusal = _claimed_by_another(tc, claims, task_id)
+    if refusal is not None:
+        return refusal
+    decision = permissions.classify(tc.name, args, mode)
+    if decision.action == permissions.ALLOW:
+        return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
+    if decision.action == permissions.DENY:
+        # Refused by the session's mode, not by a person — say so,
+        # so the model stops rather than re-asking a locked door.
+        _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": decision.reason})
+        return json.dumps({
+            "error": f"Refused: {decision.reason}. This session's permission "
+                     "mode forbids it — don't retry, and don't work around it. "
+                     "Tell the user what you needed and why."
+        })
+    if approver.approve(tc.name, args, decision.reason):
+        # Consent has to actually grant the thing. The file tools
+        # are workspace-bound in _resolve(), so without this an
+        # approved out-of-workspace write would still fail — the
+        # prompt would be asking a question it couldn't honour.
+        # Covers "always" too: approve() returns True without
+        # re-asking, and each new path still gets granted here.
+        if tc.name in permissions.PATH_TOOLS and args.get("path"):
+            file_tools.allow_path(args["path"])
+        return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
+    if verbose:
+        print("\033[91mDenied.\033[0m")
+    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": "denied by user"})
+    return json.dumps({
+        "error": "User denied this action. Do not retry it as-is — "
+                 "explain what you were trying to do and ask how to proceed, "
+                 "or try a different approach."
+    })
+
+
 # --- The agent loop -----------------------------------------------------------
 
 def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, interactive: bool = True,
               task_id: str | None = None, event_sink: "EventSink | None" = None,
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
-              mode: str = permissions.WORKSPACE_WRITE, approver=None) -> str:
+              mode: str = permissions.WORKSPACE_WRITE, approver=None,
+              tools: list[dict] | None = None, extra_handlers: dict | None = None,
+              stop_when: Callable[[], bool] | None = None, claims=None) -> str:
     """mode is the sandbox axis (read-only / workspace-write / full-access);
     `approver` is the approval axis — who gets asked when policy says ASK.
     They're independent on purpose: see permissions.py.
@@ -145,8 +222,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     all defaulted so the plain CLI still works unchanged). keep_alive=True is
     for a live top-level chat session only — never set it for a delegated
     executor task, or it'll block forever waiting for input nobody's going to
-    send, deadlocking whatever's waiting on this task via
-    DependencyGraph.wait_for_dependencies()."""
+    send, and the orchestrator with it: it waits for every running task."""
     provider = get_provider(model_key)
     # Start from no grants, whatever happened on this thread before. Clearing
     # only on the way out would miss a run that raised, and two sequential
@@ -156,6 +232,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     system_prompt = build_system_prompt(model_key)  # model_key is fixed for this run
     todo_manager = TodoManager()  # own instance per run — never shared, no lock needed
     mem = mem or memory.default_memory()
+    tools = tools if tools is not None else ALL_TOOLS
 
     # This list IS the conversation — resent in full every call.
     history = [Turn(role="user", text=task)]
@@ -167,7 +244,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             for msg in injection_queue.drain(task_id):
                 history.append(Turn(role="user", text=f"[Message from human]: {msg}"))
                 _emit(event_sink, "human_message_injected", {"task_id": task_id, "content": msg})
-        response = provider.generate(history, ALL_TOOLS, system_prompt)
+        response = provider.generate(history, tools, system_prompt)
 
         if response.text:
             final_text = response.text
@@ -203,7 +280,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             break
 
         # Assistant turn has to land in history before its tool results do.
-        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls))
+        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
 
         tool_results = []
         executed_results = []  # kept alongside tool_results for compaction summaries
@@ -214,49 +291,9 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 print(f"\033[93m$ {args.get('command', '')}\033[0m")
             _emit(event_sink, "tool_call", {"task_id": task_id, "name": tc.name, "args": args})
 
-            if tc.raw and tc.raw.get("args_parse_error"):
-                # Adapter couldn't parse this call's JSON args — don't execute
-                # with empty/wrong args, hand back a tool-error the model can react to.
-                raw_args = tc.raw.get("raw_arguments", "")
-                result = json.dumps({
-                    "error": f"Could not parse arguments for {tc.name}: {tc.raw['args_parse_error']}. "
-                             f"Raw arguments received: {raw_args[:300]!r}. "
-                             "Retry the call with valid JSON arguments."
-                })
-            else:
-                decision = permissions.classify(tc.name, args, mode)
-                if decision.action == permissions.ALLOW:
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem)
-                elif decision.action == permissions.DENY:
-                    # Refused by the session's mode, not by a person — say so,
-                    # so the model stops rather than re-asking a locked door.
-                    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name,
-                                                      "reason": decision.reason})
-                    result = json.dumps({
-                        "error": f"Refused: {decision.reason}. This session's permission "
-                                 "mode forbids it — don't retry, and don't work around it. "
-                                 "Tell the user what you needed and why."
-                    })
-                elif approver.approve(tc.name, args, decision.reason):
-                    # Consent has to actually grant the thing. The file tools
-                    # are workspace-bound in _resolve(), so without this an
-                    # approved out-of-workspace write would still fail — the
-                    # prompt would be asking a question it couldn't honour.
-                    # Covers "always" too: approve() returns True without
-                    # re-asking, and each new path still gets granted here.
-                    if tc.name in permissions.PATH_TOOLS and args.get("path"):
-                        file_tools.allow_path(args["path"])
-                    result = execute_tool(tc.name, args, model_key, todo_manager, mem)
-                else:
-                    if verbose:
-                        print("\033[91mDenied.\033[0m")
-                    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name,
-                                                      "reason": "denied by user"})
-                    result = json.dumps({
-                        "error": "User denied this action. Do not retry it as-is — "
-                                 "explain what you were trying to do and ask how to proceed, "
-                                 "or try a different approach."
-                    })
+            result = run_tool_call(tc, mode=mode, approver=approver, model_key=model_key,
+                                   todo_manager=todo_manager, mem=mem, extra_handlers=extra_handlers,
+                                   event_sink=event_sink, task_id=task_id, verbose=verbose, claims=claims)
 
             if verbose:
                 if tc.name == "todo_write":
@@ -271,15 +308,17 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result))
             executed_results.append({"name": tc.name, "content": result})
 
-        if turn_count % COMPACT_EVERY == 0:
+        if stop_when is not None and stop_when():
+            break
+
+        history.append(Turn(role="user", tool_results=tool_results))
+        if context.should_compact(history):
             # Drop the raw history, replace it with a summary — the todo list
             # already externalizes progress, so nothing essential is lost.
             if verbose:
                 print(f"\033[95m[context] Compacting after {turn_count} turns — replacing history with a summary.\033[0m")
             compact_text = build_compact_input(task, todo_manager.render(), executed_results)
             history = [Turn(role="user", text=compact_text)]
-        else:
-            history.append(Turn(role="user", tool_results=tool_results))
 
     # Grants are per-run, not per-thread-lifetime: executor threads are created
     # per batch but nothing guarantees they aren't reused, and a later run must

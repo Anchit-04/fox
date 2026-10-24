@@ -10,9 +10,9 @@ non-Anthropic providers speak this dialect.
 import json
 import time
 
-from openai import OpenAI, RateLimitError
+from openai import InternalServerError, OpenAI, RateLimitError
 
-from .base import Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
 
 MAX_RETRIES = 5
 
@@ -20,7 +20,7 @@ MAX_RETRIES = 5
 class OpenAICompatibleProvider(Provider):
     def __init__(self, model_id: str, env_key: str, base_url: str | None = None):
         super().__init__(model_id, env_key, base_url)
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=REQUEST_TIMEOUT_SECONDS)
 
     def generate(self, history: list[Turn], tools: list[dict], system_prompt: str) -> ProviderResponse:
         messages = [{"role": "system", "content": system_prompt}] + _to_openai_messages(history)
@@ -37,6 +37,9 @@ class OpenAICompatibleProvider(Provider):
         ]
         response = self._create_with_retry(model=self.model_id, messages=messages, tools=oai_tools)
 
+        if not response.choices:
+            error = getattr(response, "error", None) or "no choices in the response"
+            raise RuntimeError(f"{self.model_id} returned no completion: {error}")
         choice = response.choices[0].message
         tool_calls = []
         for tc in (choice.tool_calls or []):
@@ -55,14 +58,29 @@ class OpenAICompatibleProvider(Provider):
 
     def _create_with_retry(self, **kwargs):
         for attempt in range(MAX_RETRIES):
+            wait = 2 ** attempt
+            last = attempt == MAX_RETRIES - 1
             try:
-                return self._client.chat.completions.create(**kwargs)
-            except RateLimitError:
-                wait = 2 ** attempt
-                if attempt == MAX_RETRIES - 1:
+                response = self._client.chat.completions.create(**kwargs)
+            except (RateLimitError, InternalServerError) as e:
+                if last:
                     raise
-                print(f"\033[91mRate limited, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
+                reason = "Rate limited" if isinstance(e, RateLimitError) else f"Server error ({e.status_code})"
+                print(f"\033[91m{reason}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
                 time.sleep(wait)
+                continue
+            if response.choices or not _is_transient(response) or last:
+                return response
+            print(f"\033[91mProvider overloaded, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
+            time.sleep(wait)
+
+
+TRANSIENT_CODES = {429, 502, 503}
+
+
+def _is_transient(response) -> bool:
+    error = getattr(response, "error", None)
+    return isinstance(error, dict) and error.get("code") in TRANSIENT_CODES
 
 
 def _to_openai_messages(history: list) -> list:

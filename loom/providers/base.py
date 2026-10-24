@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import os
 
+REQUEST_TIMEOUT_SECONDS = 120
+
 
 @dataclass
 class ToolCall:
@@ -32,12 +34,14 @@ class Turn:
     text: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)     # assistant turn requesting tools
     tool_results: list[ToolResult] = field(default_factory=list)  # user turn carrying results back
+    raw: list | None = None
 
 
 @dataclass
 class ProviderResponse:
     text: str | None
     tool_calls: list[ToolCall]
+    raw: list | None = None
 
 
 class Provider(ABC):

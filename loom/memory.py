@@ -7,6 +7,7 @@ per session; default_memory() is only for the standalone single-agent CLI.
 """
 
 import itertools
+import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,7 +101,13 @@ MEMORY_READ_TOOL = {
 }
 
 MEMORY_TOOLS = [MEMORY_WRITE_TOOL, MEMORY_READ_TOOL]
+def _memory_write(mem: Memory, agent: str, args: dict) -> str:
+    entry_id = mem.next_note_id()
+    mem.append_entry(entry_id, agent, args["content"], kind="note")
+    return json.dumps({"ok": True, "id": entry_id})
+
+
 MEMORY_TOOL_HANDLERS = {
-    "memory_write": lambda mem, agent, args: mem.append_entry(mem.next_note_id(), agent, args["content"], kind="note"),
+    "memory_write": _memory_write,
     "memory_read": lambda mem, agent, args: mem.read_entry(args["entry_id"]),
 }
