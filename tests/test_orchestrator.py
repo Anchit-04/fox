@@ -367,6 +367,14 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(ok.startswith("t1 started"))
         self.assertIn("[task finished] t1 [read] done", seen(model.requests[2]))
 
+    def test_a_write_task_without_a_scope_is_not_created(self):
+        model = ScriptedModel(reply(delegate("w", "fix whatever is broken", lane="write")), done())
+        self.run_with(model)
+        (result,) = model.results_seen(1)
+        self.assertIn("Task not created", result)
+        self.assertIn("scope", result)
+        self.assertEqual(self.executor_calls, [])
+
     def test_unknown_and_unparseable_calls_get_errors(self):
         model = ScriptedModel(
             reply(ToolCall("x", "launch_rockets", {}),

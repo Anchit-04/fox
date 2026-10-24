@@ -77,7 +77,7 @@ MODEL_REGISTRY = {
         "tier": "cheap",
     },
     # 1M context — the one to reach for when a task reads a lot of files.
-    # ~6.5s/call. Its 550b sibling also tool-calls but takes ~39s, unusable here.
+    # ~6.5s/call. Its 550b sibling is nemotron-ultra below: it tool-calls but was ~39s/call when measured.
     "nemotron-lightning": {
         "provider": OpenAICompatibleProvider,
         "model_id": "nvidia/nemotron-3.5-lightning:free",

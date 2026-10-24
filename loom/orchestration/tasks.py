@@ -82,11 +82,11 @@ class Task:
         if to in _NEEDS_ERROR and not error:
             raise InvalidTransition(f"task {self.id}: {to.value} needs an error saying why")
 
-        self.status = to
         if report is not None:
             self.report = report
         if error is not None:
             self.error = error
+        self.status = to
 
 
 class TaskRegistry:

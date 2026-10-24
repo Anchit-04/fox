@@ -167,6 +167,29 @@ class AnthropicAdapter(unittest.TestCase):
         self.generate_with(anthropic_message())
         self.assertGreaterEqual(self.sent[0]["max_tokens"], 16000)
 
+    def failing_then(self, *errors):
+        import anthropic
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        made = [getattr(anthropic, name)("busy", response=httpx.Response(status, request=request), body=None)
+                for name, status in errors]
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.get_final_message.return_value = anthropic_message(
+            SimpleNamespace(type="text", text="hi"))
+        stream = mock.patch.object(self.provider._client.messages, "stream", side_effect=made + [cm])
+        sleep = mock.patch("providers.anthropic.time.sleep")
+        with stream as s, sleep:
+            result = self.provider.generate([Turn(role="user", text="hi")], [], "system")
+        return result, s.call_count
+
+    def test_overloaded_and_server_errors_are_retried(self):
+        result, calls = self.failing_then(("OverloadedError", 529), ("InternalServerError", 500),
+                                          ("ServiceUnavailableError", 503))
+        self.assertEqual((result.text, calls), ("hi", 4))
+
+    def test_bad_request_is_not_retried(self):
+        with self.assertRaises(Exception):
+            self.failing_then(("BadRequestError", 400))
+
 
 if __name__ == "__main__":
     unittest.main()

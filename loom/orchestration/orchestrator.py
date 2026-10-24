@@ -12,7 +12,7 @@ from injection import InjectionQueue
 from orchestration.claims import FileClaims
 from orchestration.dispatch import Finished, TaskInbox, start_task
 from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
-from orchestration.tasks import Task, TaskRegistry
+from orchestration.tasks import Lane, Task, TaskRegistry
 from providers import ToolResult, Turn, get_provider
 from tools import file_tools
 from tools.todo_tool import TodoManager
@@ -106,12 +106,11 @@ def _create_task(registry: TaskRegistry, args: dict) -> Task:
     model_key = args.get("model_key") or None
     if model_key is not None and not isinstance(model_key, str):
         raise ValueError("'model_key' must be a string")
-    return registry.create(
-        description.strip(),
-        lane_from_proposal(args.get("lane")),
-        [p.strip() for p in scope if p.strip()],
-        model_key,
-    )
+    lane = lane_from_proposal(args.get("lane"))
+    scope = [p.strip() for p in scope if p.strip()]
+    if lane is Lane.WRITE and not scope:
+        raise ValueError("a write task must list every file it will change in 'scope'")
+    return registry.create(description.strip(), lane, scope, model_key)
 
 
 def _summarize(task: Task, proposals: tuple[str, ...] = ()) -> str:

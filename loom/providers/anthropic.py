@@ -53,15 +53,18 @@ class AnthropicProvider(Provider):
         return ProviderResponse(text=text, tool_calls=tool_calls, raw=list(response.content))
 
     def _create_with_retry(self, **kwargs):
+        a = self._anthropic
+        transient = (a.RateLimitError, a.OverloadedError, a.ServiceUnavailableError, a.InternalServerError)
         for attempt in range(MAX_RETRIES):
             try:
                 with self._client.messages.stream(**kwargs) as stream:
                     return stream.get_final_message()
-            except self._anthropic.RateLimitError:
+            except transient as e:
                 wait = 2 ** attempt
                 if attempt == MAX_RETRIES - 1:
                     raise
-                print(f"\033[91mRate limited, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
+                reason = "Rate limited" if isinstance(e, a.RateLimitError) else f"Server error ({e.status_code})"
+                print(f"\033[91m{reason}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
                 time.sleep(wait)
 
 

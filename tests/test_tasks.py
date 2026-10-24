@@ -71,6 +71,22 @@ class RequiredPayloads(unittest.TestCase):
         self.assertIs(t.status, S.RUNNING)
         self.assertIsNone(t.report)
 
+    def test_report_and_error_are_set_before_the_status(self):
+        seen = []
+
+        class Watched(Task):
+            def __setattr__(self, name, value):
+                if name == "status":
+                    seen.append((value, getattr(self, "report", None), getattr(self, "error", None)))
+                super().__setattr__(name, value)
+
+        done = Watched(id="t1", description="d", lane=Lane.WRITE, scope=[], status=S.RUNNING)
+        done.transition(S.DONE, report=REPORT)
+        failed = Watched(id="t2", description="d", lane=Lane.WRITE, scope=[], status=S.RUNNING)
+        failed.transition(S.FAILED, error="boom")
+        self.assertEqual(seen[1], (S.DONE, REPORT, None))
+        self.assertEqual(seen[3], (S.FAILED, None, "boom"))
+
     def test_bad_endings_require_an_error(self):
         for s in (S.FAILED, S.CANCELLED, S.ESCALATED):
             with self.subTest(s=s):

@@ -124,8 +124,8 @@ def _start_session(task: str, model_key: str | None, mode: str, loop: asyncio.Ab
                    parent: "Session | None" = None) -> Session:
     """mode="agent" (default) runs a single agent with real bash/file tools —
     a normal coding-harness session, one model, no delegation. mode=
-    "orchestrator" is the Phase 5 multi-agent path: plans and delegates,
-    never touches files/bash directly itself. Both emit the same event
+    "orchestrator" is the multi-agent path: plans, delegates tasks that run
+    in the background, and makes connected edits itself. Both emit the same event
     shapes, so the rest of Session doesn't need to know which one is running."""
     session_id = str(uuid.uuid4())
     if parent is not None:

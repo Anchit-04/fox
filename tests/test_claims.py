@@ -34,6 +34,18 @@ class Claims(unittest.TestCase):
         self.assertEqual(self.claims.owner("docs/api.md"), "t1")
         self.assertEqual(self.claims.claim("t2", ["docs/api.md"]), ["docs/api.md"])
 
+    def test_every_spelling_of_one_file_shares_a_claim(self):
+        self.claims.claim("t1", ["docs/api.md"])
+        for spelling in ("docs/x/../api.md", str(Path.cwd() / "docs" / "api.md")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self.claims.owner(spelling), "t1")
+                self.assertEqual(self.claims.claim("t2", [spelling]), [spelling])
+
+    @unittest.skipUnless(sys.platform == "win32", "paths are case-insensitive only on Windows")
+    def test_case_does_not_matter_on_windows(self):
+        self.claims.claim("t1", ["README.md"])
+        self.assertEqual(self.claims.owner("readme.MD"), "t1")
+
     def test_release_frees_only_that_tasks_files(self):
         self.claims.claim("t1", ["a.py"])
         self.claims.claim("t2", ["b.py"])

@@ -61,7 +61,7 @@ class Covers(unittest.TestCase):
         self.assertTrue(covers(".", "anything/at/all.py"))
 
 
-class Recording(WorkspaceCase):
+class AuditCase(WorkspaceCase):
     def make(self, scope, task_id="t1"):
         self.seen = []
         task = Task(task_id, "d", Lane.WRITE, scope)
@@ -71,6 +71,8 @@ class Recording(WorkspaceCase):
         audit.sink("tool_call", {"task_id": task_id, "name": name, "args": {"path": path}})
         audit.sink("tool_result", {"task_id": task_id, "name": name, "content": result})
 
+
+class Recording(AuditCase):
     def test_successful_writes_are_recorded(self):
         a = self.make(["cli.py"])
         self.write(a, "cli.py", OK)
@@ -120,7 +122,7 @@ class Recording(WorkspaceCase):
         self.assertEqual(a.written, {"cli.py"})
 
 
-class Verdict(Recording):
+class Verdict(AuditCase):
     def test_both_directions_of_misprediction(self):
         a = self.make(["cli.py", "docs"])
         self.write(a, "cli.py", OK)
