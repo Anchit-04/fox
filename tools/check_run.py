@@ -5,8 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
+
+from permissions import WRITE_TOOLS
+
 TERMINAL = {"done", "failed", "cancelled", "escalated"}
-WRITE_TOOLS = {"write_file", "edit_file"}
 CONTROL_TOOLS = {"delegate_task", "wait_for_tasks"}
 
 
