@@ -23,6 +23,8 @@ from context import MAX_ITERATIONS, build_compact_input
 from providers import get_provider, Turn, ToolResult
 from sandbox.sandbox_client import run_bash_command
 import memory
+from events import EventSink, emit
+from history import History
 
 MODEL_KEY = "gemini-flash"          # default entry in providers/config.py's MODEL_REGISTRY
 
@@ -102,15 +104,6 @@ BASH_TOOL = {
 
 ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS
 
-# event_sink is None by default (no server attached) — purely additive, the
-# single-agent CLI is unaffected.
-EventSink = Callable[[str, dict], None]
-
-
-def _emit(event_sink: "EventSink | None", event_type: str, payload: dict) -> None:
-    if event_sink is not None:
-        event_sink(event_type, payload)
-
 
 # --- Tool execution -----------------------------------------------------------
 
@@ -134,11 +127,8 @@ def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
             or name in memory.MEMORY_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
 
 
-CLAIMED_TOOLS = frozenset({"write_file", "edit_file"})
-
-
 def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
-    if claims is None or tc.name not in CLAIMED_TOOLS:
+    if claims is None or tc.name not in permissions.WRITE_TOOLS:
         return None
     path = tc.args.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -174,7 +164,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
     if decision.action == permissions.DENY:
         # Refused by the session's mode, not by a person — say so,
         # so the model stops rather than re-asking a locked door.
-        _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": decision.reason})
+        emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": decision.reason})
         return json.dumps({
             "error": f"Refused: {decision.reason}. This session's permission "
                      "mode forbids it — don't retry, and don't work around it. "
@@ -192,7 +182,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
     if verbose:
         print("\033[91mDenied.\033[0m")
-    _emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": "denied by user"})
+    emit(event_sink, "tool_denied", {"task_id": task_id, "name": tc.name, "reason": "denied by user"})
     return json.dumps({
         "error": "User denied this action. Do not retry it as-is — "
                  "explain what you were trying to do and ask how to proceed, "
@@ -235,22 +225,20 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     tools = tools if tools is not None else ALL_TOOLS
 
     # This list IS the conversation — resent in full every call.
-    history = [Turn(role="user", text=task)]
+    history = History(task)
 
     turn_count = 0
     final_text = ""
     while True:
         if injection_queue is not None:
-            for msg in injection_queue.drain(task_id):
-                history.append(Turn(role="user", text=f"[Message from human]: {msg}"))
-                _emit(event_sink, "human_message_injected", {"task_id": task_id, "content": msg})
-        response = provider.generate(history, tools, system_prompt)
+            history.add_human_messages(injection_queue.drain(task_id), task_id, event_sink)
+        response = provider.generate(history.turns, tools, system_prompt)
 
         if response.text:
             final_text = response.text
             if verbose:
                 print(f"\n\033[94m{model_key}:\033[0m {response.text}")
-            _emit(event_sink, "agent_turn", {"task_id": task_id, "model_key": model_key, "text": response.text})
+            emit(event_sink, "agent_turn", {"task_id": task_id, "model_key": model_key, "text": response.text})
 
         if not response.tool_calls:
             if keep_alive and injection_queue is not None:
@@ -261,9 +249,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 messages = injection_queue.wait_for_message(task_id)
                 if messages is None:
                     break
-                for msg in messages:
-                    history.append(Turn(role="user", text=f"[Message from human]: {msg}"))
-                    _emit(event_sink, "human_message_injected", {"task_id": task_id, "content": msg})
+                history.add_human_messages(messages, task_id, event_sink)
                 continue
             break  # model is done: no more tools requested
 
@@ -276,11 +262,11 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                     "this harness is tuned for. Check the plan above for progress "
                     "made so far.\033[0m"
                 )
-            _emit(event_sink, "error", {"task_id": task_id, "message": f"hit the {MAX_ITERATIONS}-turn safety cap"})
+            emit(event_sink, "error", {"task_id": task_id, "message": f"hit the {MAX_ITERATIONS}-turn safety cap"})
             break
 
         # Assistant turn has to land in history before its tool results do.
-        history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
+        history.add(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
 
         tool_results = []
         executed_results = []  # kept alongside tool_results for compaction summaries
@@ -289,7 +275,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
 
             if verbose and tc.name == "run_bash_command":
                 print(f"\033[93m$ {args.get('command', '')}\033[0m")
-            _emit(event_sink, "tool_call", {"task_id": task_id, "name": tc.name, "args": args})
+            emit(event_sink, "tool_call", {"task_id": task_id, "name": tc.name, "args": args})
 
             result = run_tool_call(tc, mode=mode, approver=approver, model_key=model_key,
                                    todo_manager=todo_manager, mem=mem, extra_handlers=extra_handlers,
@@ -301,9 +287,9 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                     print(f"\033[96mPlan:\033[0m\n{checklist}")
                 else:
                     print(result[:500])
-            _emit(event_sink, "tool_result", {"task_id": task_id, "name": tc.name, "content": result})
+            emit(event_sink, "tool_result", {"task_id": task_id, "name": tc.name, "content": result})
             if tc.name == "todo_write":
-                _emit(event_sink, "todo_updated", {"task_id": task_id, "checklist": todo_manager.render()})
+                emit(event_sink, "todo_updated", {"task_id": task_id, "checklist": todo_manager.render()})
 
             tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result))
             executed_results.append({"name": tc.name, "content": result})
@@ -311,14 +297,13 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
         if stop_when is not None and stop_when():
             break
 
-        history.append(Turn(role="user", tool_results=tool_results))
-        if context.should_compact(history):
+        history.add(Turn(role="user", tool_results=tool_results))
+        if context.should_compact(history.turns):
             # Drop the raw history, replace it with a summary — the todo list
             # already externalizes progress, so nothing essential is lost.
             if verbose:
                 print(f"\033[95m[context] Compacting after {turn_count} turns — replacing history with a summary.\033[0m")
-            compact_text = build_compact_input(task, todo_manager.render(), executed_results)
-            history = [Turn(role="user", text=compact_text)]
+            history.replace_with_summary(build_compact_input(task, todo_manager.render(), executed_results))
 
     # Grants are per-run, not per-thread-lifetime: executor threads are created
     # per batch but nothing guarantees they aren't reused, and a later run must

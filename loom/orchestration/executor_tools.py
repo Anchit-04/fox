@@ -2,7 +2,7 @@ import json
 import threading
 from dataclasses import dataclass
 
-from agent import _emit
+from events import emit
 from orchestration.tasks import Report
 
 REPORT_TOOL = {
@@ -135,7 +135,7 @@ class ProposalBox:
             proposal = Proposal(task_id, text.strip())
             with self._lock:
                 self._items.append(proposal)
-            _emit(self._event_sink, "proposal_made", {"task_id": task_id, "text": proposal.text})
+            emit(self._event_sink, "proposal_made", {"task_id": task_id, "text": proposal.text})
             return json.dumps({"ok": True, "note": "Proposal recorded. Do not do it yourself; carry on with your task."})
         return handle
 

@@ -1,6 +1,7 @@
 import threading
 from dataclasses import dataclass
-from agent import ALL_TOOLS,run_agent,_emit
+from agent import ALL_TOOLS,run_agent
+from events import emit
 from config import routing
 from orchestration.claims import FileClaims
 from orchestration.executor_tools import EXECUTOR_TOOLS,REPORT_INSTRUCTIONS,ProposalBox,ReportCollector
@@ -39,7 +40,7 @@ class TaskInbox:
 
 def _set_status(task: Task, to: TaskStatus, event_sink,*,report=None, error=None)->None:
   task.transition(to,report=report,error=error)
-  _emit(event_sink,"task_status_changed",{"task_id":task.id,"status":to.value,"error":error})
+  emit(event_sink,"task_status_changed",{"task_id":task.id,"status":to.value,"error":error})
 
 def _memory_text(task: Task)->str:
   if task.report is None:
@@ -93,10 +94,10 @@ def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,inje
   else:
     _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals)
   mem.append_entry(task.id,model_key,_memory_text(task),scope =task.scope,kind="task_result")
-  _emit(event_sink,"memory_entry_added",{"task_id":task.id,"agent":model_key})
+  emit(event_sink,"memory_entry_added",{"task_id":task.id,"agent":model_key})
 
 def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,event_sink=None,injection_queue=None,approver=None)->list[str]:
-  _emit(event_sink,"task_created",{"task_id":task.id,"description":task.description,"lane":task.lane.value,"scope":task.scope})
+  emit(event_sink,"task_created",{"task_id":task.id,"description":task.description,"lane":task.lane.value,"scope":task.scope})
   if task.lane is Lane.WRITE:
     taken = claims.claim(task.id,task.scope)
     if taken:
