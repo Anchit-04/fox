@@ -93,7 +93,7 @@ class Wiring(unittest.TestCase):
 
     def test_memory_write_returns_the_note_id_it_can_be_read_back_by(self):
         with tempfile.TemporaryDirectory() as tmp:
-            mem = memory.Memory(Path(tmp) / "mem.md")
+            mem = memory.Memory.scratch()
             write, read = memory.MEMORY_TOOL_HANDLERS["memory_write"], memory.MEMORY_TOOL_HANDLERS["memory_read"]
             first = json.loads(write(mem, "gemini-flash", {"content": "use argparse"}))
             second = json.loads(write(mem, "gemini-flash", {"content": "tests live in tests/"}))
@@ -158,7 +158,7 @@ def call(name, args, call_id="c1"):
 class RunAgentHooks(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.mem = memory.Memory(Path(self.tmp.name) / "mem.md")
+        self.mem = memory.Memory.scratch()
 
     def tearDown(self):
         self.tmp.cleanup()

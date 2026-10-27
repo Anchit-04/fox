@@ -44,7 +44,7 @@ def read_step(i):
 class AgentCompaction(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.mem = memory.Memory(Path(self.tmp.name) / "mem.md")
+        self.mem = memory.Memory.scratch()
 
     def tearDown(self):
         self.tmp.cleanup()
