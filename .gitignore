@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 sessions/
+fox.db
+fox.db-wal
+fox.db-shm
 
 # The build plan is kept local only — not published to the remote.
 PLAN.md
