@@ -53,7 +53,7 @@ class DispatchTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.mem = memory.Memory(Path(tmp.name) / "mem.md")
+        self.mem = memory.Memory.scratch()
         self.events = []
         self.claims = FileClaims()
         self.inbox = TaskInbox()
@@ -189,6 +189,8 @@ class DispatchTests(unittest.TestCase):
         index = self.mem.read_index()
         self.assertIn("id=t1 agent=fake-model", index)
         self.assertIn("id=t2 agent=none", index)
+        entry = self.mem.store.memory_entry(self.mem.session_id, "t1")
+        self.assertEqual((entry["task_id"], entry["kind"]), ("t1", "task_result"))
 
     def test_events_announce_the_task_then_its_ending(self):
         self.run_all(Lane.READ)
@@ -197,7 +199,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.events[0][1]["lane"], "read")
         statuses = [p["status"] for e, p in self.events if e == "task_status_changed"]
         self.assertEqual(statuses, ["running", "done"])
-        self.assertEqual(kinds[-1], "memory_entry_added")
+        self.assertEqual(kinds[-1], "task_status_changed")
 
     def test_every_executed_task_is_scope_audited(self):
         self.agent.behaviour = "crash"

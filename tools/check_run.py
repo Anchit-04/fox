@@ -5,8 +5,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
+
+from paths import db_path
+from permissions import WRITE_TOOLS
+from store import Store
+
 TERMINAL = {"done", "failed", "cancelled", "escalated"}
-WRITE_TOOLS = {"write_file", "edit_file"}
 CONTROL_TOOLS = {"delegate_task", "wait_for_tasks"}
 
 
@@ -73,6 +78,16 @@ def analyze(state: dict) -> dict:
     }
 
 
+def load(session: str, db: Path) -> dict:
+    if session.endswith(".json"):
+        return json.loads(Path(session).read_text(encoding="utf-8"))
+    with Store.open(db, readonly=True) as store:
+        state = store.session_view(session)
+    if state is None:
+        sys.exit(f"no session {session!r} in {db}")
+    return state
+
+
 def git_changed(fixture: Path) -> set[str]:
     out = subprocess.run(["git", "-C", str(fixture), "status", "--porcelain"],
                          capture_output=True, text=True, check=True).stdout
@@ -81,10 +96,11 @@ def git_changed(fixture: Path) -> set[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check a Fox orchestrator session against its exit criteria.")
-    parser.add_argument("session_file", type=Path)
+    parser.add_argument("session", help="a session id in fox.db, or an old sessions/<id>.json file")
     parser.add_argument("--fixture", type=Path, default=None)
+    parser.add_argument("--db", type=Path, default=db_path())
     args = parser.parse_args()
-    state = json.loads(args.session_file.read_text(encoding="utf-8"))
+    state = load(args.session, args.db)
     r = analyze(state)
 
     write_audits = [a for a in r["audits"] if a["lane"] == "write"]

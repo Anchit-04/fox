@@ -20,38 +20,21 @@ def pick_orchestrator() -> str:
     )
 
 
-def pick_executor(exclude: frozenset[str] = frozenset(), preferred: str | None = None) -> str:
+def pick_executor(preferred: str | None = None) -> str:
     if preferred is not None:
-        if preferred in exclude:
-            raise RoutingError(f"requested executor {preferred!r} already used in this batch")
         if not vault.is_present(preferred):
             raise RoutingError(f"requested executor {preferred!r} has no API key configured")
         return preferred
 
-    cheap_candidates = [
-        k for k in MODEL_REGISTRY if get_tier(k) == "cheap" and k not in exclude and vault.is_present(k)
-    ]
+    cheap_candidates = [k for k in MODEL_REGISTRY if get_tier(k) == "cheap" and vault.is_present(k)]
     if cheap_candidates:
         return cheap_candidates[0]
 
-    fallback_candidates = [k for k in MODEL_REGISTRY if k not in exclude and vault.is_present(k)]
+    fallback_candidates = [k for k in MODEL_REGISTRY if vault.is_present(k)]
     if fallback_candidates:
         return fallback_candidates[0]
 
     raise RoutingError(
-        f"No model with a present API key is available for an executor "
-        f"(excluding {sorted(exclude)}). Configure at least one key in .env."
+        "No model with a present API key is available for an executor. "
+        "Configure at least one key in .env."
     )
-
-
-def pick_executors(n: int) -> list[str]:
-    picked: list[str] = []
-    for _ in range(n):
-        try:
-            picked.append(pick_executor(exclude=frozenset(picked)))
-        except RoutingError:
-            raise RoutingError(
-                f"Only {len(picked)} distinct executor(s) available, need {n}. "
-                "Configure more API keys in .env."
-            )
-    return picked

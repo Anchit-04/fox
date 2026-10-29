@@ -3,11 +3,13 @@ from dataclasses import dataclass, field
 
 import memory
 import permissions
-from agent import ALL_TOOLS, IDENTITY, _emit, run_tool_call
+from agent import ALL_TOOLS, IDENTITY, run_tool_call
+from events import emit
 from approval import DenyApprover
 from config import preferences, routing
 import context
 from context import MAX_ITERATIONS, build_compact_input
+from history import History
 from injection import InjectionQueue
 from orchestration.claims import FileClaims
 from orchestration.dispatch import Finished, TaskInbox, start_task
@@ -168,7 +170,7 @@ def _run_own(tc, run: _Run) -> str:
     result = run_tool_call(tc, mode=run.mode, approver=run.approver, model_key=run.model_key,
                            todo_manager=run.todo, mem=run.mem, event_sink=run.event_sink, claims=run.claims)
     if tc.name == "todo_write":
-        _emit(run.event_sink, "todo_updated", {"task_id": None, "checklist": run.todo.render()})
+        emit(run.event_sink, "todo_updated", {"task_id": None, "checklist": run.todo.render()})
     return result
 
 
@@ -205,7 +207,7 @@ def _wait(run: _Run) -> str:
 def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
     results: dict[str, str] = {}
     for tc in calls:
-        _emit(run.event_sink, "tool_call", {"task_id": None, "name": tc.name, "args": tc.args})
+        emit(run.event_sink, "tool_call", {"task_id": None, "name": tc.name, "args": tc.args})
         if tc.raw and tc.raw.get("args_parse_error"):
             results[tc.id] = json.dumps({"error": f"Could not parse the arguments for {tc.name}. Retry with valid JSON."})
         elif tc.name == "delegate_task":
@@ -214,7 +216,7 @@ def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
             results[tc.id] = _wait(run)
         else:
             results[tc.id] = _run_own(tc, run)
-        _emit(run.event_sink, "tool_result", {"task_id": None, "name": tc.name, "content": results[tc.id]})
+        emit(run.event_sink, "tool_result", {"task_id": None, "name": tc.name, "content": results[tc.id]})
     return [ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id]) for tc in calls]
 
 
@@ -236,52 +238,50 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
     tools = orchestrator_tools(mode)
     file_tools.clear_approved_paths()
 
-    history = [Turn(role="user", text=task)]
+    history = History(task)
     final_text = ""
     turns = 0
     try:
         while True:
             if injection_queue is not None:
-                for msg in injection_queue.drain(None):
-                    history.append(Turn(role="user", text=f"[Message from human]: {msg}"))
-                    _emit(event_sink, "human_message_injected", {"task_id": None, "content": msg})
+                history.add_human_messages(injection_queue.drain(None), None, event_sink)
             _deliver(history, run, _finished_text(run, run.inbox.drain()))
 
-            response = provider.generate(history, tools, _system_prompt(run))
+            response = provider.generate(history.turns, tools, _system_prompt(run))
 
             if response.text:
                 final_text = response.text
-                _emit(event_sink, "agent_turn", {"task_id": None, "model_key": model_key, "text": response.text})
+                emit(event_sink, "agent_turn", {"task_id": None, "model_key": model_key, "text": response.text})
             if not response.tool_calls:
                 if not run.running:
                     break
-                history.append(Turn(role="assistant", text=response.text or "(waiting for running tasks)",
-                                    raw=response.raw))
+                history.add(Turn(role="assistant", text=response.text or "(waiting for running tasks)",
+                                 raw=response.raw))
                 _deliver(history, run, _wait(run) + "\n\nTasks were still running, so you cannot finish yet. "
                                                     "Review the results above before your final answer.")
                 continue
 
             turns += 1
             if turns >= MAX_ITERATIONS:
-                _emit(event_sink, "error", {"task_id": None, "message": f"hit the {MAX_ITERATIONS}-turn safety cap"})
+                emit(event_sink, "error", {"task_id": None, "message": f"hit the {MAX_ITERATIONS}-turn safety cap"})
                 break
 
-            history.append(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
+            history.add(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
             results = _run_turn(response.tool_calls, run)
 
-            history.append(Turn(role="user", tool_results=results))
-            if context.should_compact(history):
+            history.add(Turn(role="user", tool_results=results))
+            if context.should_compact(history.turns):
                 summary = build_compact_input(task, run.todo.render(),
                                               [{"name": r.name, "content": r.content} for r in results])
-                history = [Turn(role="user", text=f"{summary}\n\nEvery task so far:\n{_ledger(run.registry)}")]
+                history.replace_with_summary(f"{summary}\n\nEvery task so far:\n{_ledger(run.registry)}")
     finally:
         _wait_for_everything(run)
         file_tools.clear_approved_paths()
     return final_text
 
 
-def _deliver(history: list, run: _Run, text: str) -> None:
+def _deliver(history: History, run: _Run, text: str) -> None:
     if not text:
         return
-    history.append(Turn(role="user", text=text))
-    _emit(run.event_sink, "task_results_delivered", {"task_id": None, "content": text})
+    history.add(Turn(role="user", text=text))
+    emit(run.event_sink, "task_results_delivered", {"task_id": None, "content": text})

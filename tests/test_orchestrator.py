@@ -13,6 +13,7 @@ import agent
 import context
 import memory
 import permissions
+from events import EVENTS
 from injection import InjectionQueue
 from orchestration import dispatch
 from orchestration import orchestrator as orch
@@ -78,7 +79,7 @@ class OrchestratorTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.mem = memory.Memory(Path(tmp.name) / "mem.md")
+        self.mem = memory.Memory.scratch()
         self.events = []
         self.executor_calls = []
 
@@ -374,6 +375,22 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("Task not created", result)
         self.assertIn("scope", result)
         self.assertEqual(self.executor_calls, [])
+
+    def test_every_event_carries_the_fields_its_catalog_entry_promises(self):
+        model = ScriptedModel(
+            reply(delegate("a", "look around"), delegate("b", "write docs", lane="write", scope=["docs.md"]),
+                  ToolCall("m", "memory_write", {"content": "use argparse"}), text="Starting."),
+            wait(), wait(), done(),
+        )
+        self.run_with(model)
+        logged = [(e["type"], e["payload"]) for e in self.mem.store.events(self.mem.session_id)]
+        emitted = self.events + logged
+        self.assertTrue({"task_created", "task_status_changed", "memory_written", "tool_call", "agent_turn"}
+                        <= {e for e, _ in emitted})
+        for event_type, payload in emitted:
+            with self.subTest(event=event_type):
+                self.assertIn(event_type, EVENTS)
+                self.assertLessEqual(EVENTS[event_type], payload.keys())
 
     def test_unknown_and_unparseable_calls_get_errors(self):
         model = ScriptedModel(

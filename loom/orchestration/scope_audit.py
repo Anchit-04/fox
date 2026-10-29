@@ -1,11 +1,9 @@
 import json
 
 import paths
-from agent import _emit
+from events import emit
 from orchestration.tasks import Task
-
-
-WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+from permissions import WRITE_TOOLS
 
 
 def normalize(path: str) -> str:
@@ -45,7 +43,7 @@ class ScopeAudit:
                 if self._pending is not None and _succeeded(payload.get("content")):
                     self.written.add(normalize(self._pending))
                 self._pending = None
-        _emit(self._inner, event_type, payload)
+        emit(self._inner, event_type, payload)
 
     @property
     def undeclared(self) -> set[str]:
@@ -56,7 +54,7 @@ class ScopeAudit:
         return {d for d in self.declared if not any(covers(d, p) for p in self.written)}
 
     def finish(self) -> None:
-        _emit(self._inner, "scope_audit", {
+        emit(self._inner, "scope_audit", {
             "task_id": self.task.id,
             "lane": self.task.lane.value,
             "declared": sorted(self.declared),

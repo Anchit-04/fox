@@ -3,7 +3,7 @@ import asyncio
 import json
 import threading
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict
 
 import websockets
 
@@ -14,35 +14,24 @@ from injection import InjectionQueue
 from approval import ApprovalGate
 import permissions
 import paths
-from paths import FOX_HOME
 from orchestration.orchestrator import run_orchestrator
+from store import Store
 
-# FOX_HOME: session transcripts are Fox's own record, not project files,
-# and session ids are unique so one directory serves every workspace.
-SESSIONS_DIR = FOX_HOME / "sessions"
-SESSIONS_DIR.mkdir(exist_ok=True)
+_STORE: Store | None = None
 
 
-@dataclass
-class SessionState:
-    session_id: str
-    task: str
-    model_key: str | None = None
-    status: str = "running"  
-    final_text: str = ""
-    todos: str = "" 
-    tasks: dict = field(default_factory=dict)  
-    task_statuses: dict = field(default_factory=dict)
-    turns: list = field(default_factory=list)  
+def store() -> Store:
+    global _STORE
+    if _STORE is None:
+        _STORE = Store.open(paths.db_path())
+    return _STORE
 
 
 class Session:
-    def __init__(self, session_id: str, task: str):
+    def __init__(self, session_id: str):
         self.session_id = session_id
-        self.state = SessionState(session_id=session_id, task=task)
         self.clients: set = set()
         self.injection_queue = InjectionQueue()
-        self._lock = threading.Lock()
         self.loop: asyncio.AbstractEventLoop | None = None
         # Emits through handle_event, so an approval request is persisted and
         # broadcast like any other event — a client that attaches mid-wait can
@@ -53,27 +42,8 @@ class Session:
         # transcript" means in practice.
         self.mem: memory.Memory | None = None
 
-    def persist(self) -> None:
-        path = SESSIONS_DIR / f"{self.session_id}.json"
-        with self._lock:
-            path.write_text(json.dumps(asdict(self.state), indent=2), encoding="utf-8")
-
     def handle_event(self, event_type: str, payload: dict) -> None:
-        with self._lock:
-            if event_type == "agent_turn" and payload.get("task_id") is None:
-                self.state.model_key = payload.get("model_key")
-            if event_type == "todo_updated" and payload.get("task_id") is None:
-                self.state.todos = payload.get("checklist", "")
-            if event_type == "task_created":
-                self.state.tasks[payload["task_id"]] = {
-                    "description": payload.get("description", ""),
-                    "scope": payload.get("scope", []),
-                    "lane": payload.get("lane"),
-                }
-            if event_type == "task_status_changed" and payload.get("task_id") is not None:
-                self.state.task_statuses[payload["task_id"]] = payload.get("status")
-            self.state.turns.append({"type": event_type, "payload": payload})
-        self.persist() 
+        store().append_event(self.session_id, event_type, payload)
         self._broadcast(event_type, payload)
 
     def _broadcast(self, event_type: str, payload: dict) -> None:
@@ -106,8 +76,8 @@ def _side_conversation_task(question: str, parent: Session) -> str:
     entry on demand rather than everything being force-fed up front."""
     parts = ["[Side conversation. The main task is still running — you are not working on it.",
              "Answer the question; don't continue the main task unless asked.]", ""]
-    with parent._lock:
-        main_task, todos = parent.state.task, parent.state.todos
+    row = store().session(parent.session_id)
+    main_task, todos = row["task"], row["todos"]
     parts.append(f"Main task: {main_task}")
     if todos:
         parts.append(f"\nProgress so far:\n{todos}")
@@ -130,18 +100,23 @@ def _start_session(task: str, model_key: str | None, mode: str, loop: asyncio.Ab
     session_id = str(uuid.uuid4())
     if parent is not None:
         task = _side_conversation_task(task, parent)
-    session = Session(session_id, task)
+    session = Session(session_id)
     session.loop = loop
+    session.handle_event("session_started", {
+        "task": task, "workspace": str(paths.workspace()), "mode": mode, "permission_mode": permission_mode,
+        "model_key": model_key, "parent_id": parent.session_id if parent is not None else None,
+    })
     with SESSIONS_LOCK:
         SESSIONS[session_id] = session
 
     # A side conversation shares its parent's memory log rather than opening a
     # fresh one, so notes written on either side are visible to both.
     mem = parent.mem if (parent is not None and parent.mem is not None) \
-        else memory.Memory(SESSIONS_DIR / session_id / "SHARED_MEMORY.md")
+        else memory.Memory(store(), session_id)
     session.mem = mem
 
     def run():
+        status = "done"
         try:
             if mode == "orchestrator":
                 final = run_orchestrator(
@@ -164,20 +139,12 @@ def _start_session(task: str, model_key: str | None, mode: str, loop: asyncio.Ab
                     injection_queue=session.injection_queue, keep_alive=True,
                     approver=session.approval_gate, mode=permission_mode,
                 )
-            with session._lock:
-                session.state.final_text = final
-                session.state.status = "done"
         except Exception as e:
-            with session._lock:
-                session.state.status = "failed"
-                session.state.final_text = str(e)
+            status, final = "failed", str(e)
         # Releases any executor thread still parked on an unanswered approval.
         # Without this they'd hold the process open after the session ended.
         session.approval_gate.close()
-        session.persist()
-        session._broadcast("session_ended", {
-            "task_id": None, "status": session.state.status, "final_text": session.state.final_text,
-        })
+        session.handle_event("session_ended", {"task_id": None, "status": status, "final_text": final})
 
     threading.Thread(target=run, daemon=True).start()
     return session
@@ -238,12 +205,14 @@ async def handler(ws) -> None:
         elif msg_type == "attach_session":
             with SESSIONS_LOCK:
                 session = SESSIONS.get(msg["session_id"])
-            if session is None:
+            state = store().session_view(msg["session_id"])
+            if state is None:
                 await ws.send(json.dumps({"type": "error", "message": f"unknown session_id {msg['session_id']!r}"}))
                 continue
-            session.clients.add(ws)
-            attached.add(session)
-            await ws.send(json.dumps({"type": "attached", "session_id": session.session_id, "state": asdict(session.state)}))
+            if session is not None:
+                session.clients.add(ws)
+                attached.add(session)
+            await ws.send(json.dumps({"type": "attached", "session_id": msg["session_id"], "state": state}))
 
         elif msg_type == "human_message":
             with SESSIONS_LOCK:

@@ -71,6 +71,8 @@ PATH_TOOLS = {
     "edit_file": ("path", True),
 }
 
+WRITE_TOOLS = frozenset(name for name, (_, modifies) in PATH_TOOLS.items() if modifies)
+
 # --- Bash heuristics ---------------------------------------------------------
 
 # Commands that only read, and whose name can't be a path into somewhere else.
