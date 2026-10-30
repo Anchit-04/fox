@@ -91,8 +91,11 @@ def _usage(usage) -> Usage:
     details = getattr(usage, "prompt_tokens_details", None)
     cached = (getattr(details, "cached_tokens", None) or getattr(usage, "prompt_cache_hit_tokens", None)
               or 0)
-    return Usage(input_tokens=prompt - cached, output_tokens=usage.completion_tokens or 0,
-                 cache_read_tokens=cached)
+    written = getattr(details, "cache_write_tokens", None) or 0
+    cost = getattr(usage, "cost", None)
+    return Usage(input_tokens=prompt - cached - written, output_tokens=usage.completion_tokens or 0,
+                 cache_read_tokens=cached, cache_write_tokens=written,
+                 reported_cost=float(cost) if isinstance(cost, (int, float)) else None)
 
 
 def _to_openai_messages(history: list) -> list:

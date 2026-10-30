@@ -43,6 +43,7 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    reported_cost: float | None = None
 
     @property
     def prompt_tokens(self) -> int:

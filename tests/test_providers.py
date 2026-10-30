@@ -113,6 +113,12 @@ class EmptyCompletion(unittest.TestCase):
         self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens), (100, 7, 900))
         self.assertEqual(usage.prompt_tokens, 1000)
 
+    def test_openrouter_cache_writes_are_taken_out_of_the_input(self):
+        details = SimpleNamespace(cached_tokens=600, cache_write_tokens=300)
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_tokens_details=details)
+        self.assertEqual((usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (100, 600, 300))
+        self.assertEqual(usage.prompt_tokens, 1000)
+
     def test_deepseek_cache_hits_are_read(self):
         usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_cache_hit_tokens=600)
         self.assertEqual((usage.input_tokens, usage.cache_read_tokens), (400, 600))
@@ -120,6 +126,13 @@ class EmptyCompletion(unittest.TestCase):
     def test_no_cache_details_means_no_cache(self):
         usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_tokens_details=None)
         self.assertEqual((usage.input_tokens, usage.cache_read_tokens), (1000, 0))
+
+    def test_openrouter_bill_is_kept(self):
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, cost=0.0042)
+        self.assertEqual(usage.reported_cost, 0.0042)
+
+    def test_no_bill_means_no_reported_cost(self):
+        self.assertIsNone(self.completion_with_usage(prompt_tokens=1000, completion_tokens=7).reported_cost)
 
     def test_no_usage_reported_is_zero(self):
         self.assertEqual(self.generate_with(SimpleNamespace(
