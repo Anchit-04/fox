@@ -10,7 +10,7 @@ import time
 from google import genai
 from google.genai import types
 
-from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn, Usage
 
 MAX_RETRIES = 5
 
@@ -49,7 +49,8 @@ class GeminiProvider(Provider):
             )
             for i, p in enumerate(fc_parts)
         ]
-        return ProviderResponse(text=response.text, tool_calls=tool_calls)
+        return ProviderResponse(text=response.text, tool_calls=tool_calls,
+                                usage=_usage(getattr(response, "usage_metadata", None)))
 
     def _generate_with_retry(self, contents, config):
         """Retries two distinct transient failures:
@@ -88,6 +89,18 @@ class GeminiProvider(Provider):
                     raise
                 print(f"\033[91m{reason}, waiting {wait:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
                 time.sleep(wait)
+
+
+def _usage(meta) -> Usage:
+    if meta is None:
+        return Usage()
+    prompt = meta.prompt_token_count or 0
+    cached = meta.cached_content_token_count or 0
+    return Usage(
+        input_tokens=prompt - cached,
+        output_tokens=(meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0),
+        cache_read_tokens=cached,
+    )
 
 
 def _build_gemini_tool(tool_schemas: list) -> "types.Tool":
