@@ -10,7 +10,7 @@ from orchestration.tasks import Lane, TaskStatus
 from store import migrations
 from store.migrations import MIGRATIONS, StoreError, migrate, version
 
-TABLES = {"sessions", "events", "tasks", "memory_entries"}
+TABLES = {"sessions", "events", "tasks", "memory_entries", "model_calls"}
 
 
 def fresh() -> sqlite3.Connection:
@@ -35,6 +35,17 @@ class Migrate(unittest.TestCase):
         migrate(db)
         self.assertEqual(migrate(db), len(MIGRATIONS))
         self.assertEqual(tables(db), TABLES)
+
+    def test_a_version_1_database_is_upgraded_and_keeps_its_data(self):
+        db = fresh()
+        with mock.patch.object(migrations, "MIGRATIONS", MIGRATIONS[:1]):
+            self.assertEqual(migrate(db), 1)
+        db.execute("INSERT INTO sessions (id, workspace, task, mode, permission_mode, started_at) "
+                   "VALUES ('old', 'w', 't', 'orchestrator', 'workspace-write', 'then')")
+        self.assertNotIn("model_calls", tables(db))
+        self.assertEqual(migrate(db), 2)
+        self.assertIn("model_calls", tables(db))
+        self.assertEqual(db.execute("SELECT task FROM sessions WHERE id = 'old'").fetchone(), ("t",))
 
     def test_a_newer_database_is_refused(self):
         db = fresh()
@@ -75,6 +86,20 @@ class SchemaMatchesCode(unittest.TestCase):
         for i, lane in enumerate(Lane):
             with self.subTest(lane=lane):
                 self.insert_task(f"l{i}", lane.value, "queued")
+
+    def insert_call(self, seq, cost, cost_source):
+        self.db.execute("INSERT INTO model_calls (session_id, seq, model_key, duration_ms, input_tokens, "
+                        "output_tokens, cache_read_tokens, cache_write_tokens, cost, cost_source, prefix, "
+                        "ended_at) VALUES ('s1', ?, 'm', 10, 1, 1, 0, 0, ?, ?, '{}', 'now')",
+                        (seq, cost, cost_source))
+
+    def test_a_call_cost_always_says_where_it_came_from(self):
+        self.insert_call(1, 0.01, "provider")
+        self.insert_call(2, 0.01, "catalog")
+        self.insert_call(3, None, None)
+        for seq, cost, source in ((4, 0.01, None), (5, None, "catalog"), (6, 0.01, "guess")):
+            with self.subTest(cost=cost, source=source), self.assertRaises(sqlite3.IntegrityError):
+                self.insert_call(seq, cost, source)
 
     def test_values_the_code_does_not_define_are_refused(self):
         with self.assertRaises(sqlite3.IntegrityError):

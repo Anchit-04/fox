@@ -1,10 +1,11 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA = Path(__file__).with_name("schema.sql")
+HERE = Path(__file__).parent
 
 MIGRATIONS: list[str] = [
-    SCHEMA.read_text(encoding="utf-8"),
+    (HERE / "schema.sql").read_text(encoding="utf-8"),
+    (HERE / "model_calls.sql").read_text(encoding="utf-8"),
 ]
 
 

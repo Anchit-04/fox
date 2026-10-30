@@ -72,6 +72,7 @@ class Store:
     def rebuild(self, session_id: str) -> None:
         with self._write() as db:
             db.execute("PRAGMA defer_foreign_keys = ON")
+            db.execute("DELETE FROM model_calls WHERE session_id = ?", (session_id,))
             db.execute("DELETE FROM memory_entries WHERE session_id = ?", (session_id,))
             db.execute("DELETE FROM tasks WHERE session_id = ?", (session_id,))
             db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -115,6 +116,10 @@ class Store:
         rows = self._query("SELECT * FROM memory_entries WHERE session_id = ? AND entry_id = ?",
                            (session_id, entry_id))
         return rows[0] if rows else None
+
+    def model_calls(self, session_id: str) -> list[dict]:
+        rows = self._query("SELECT * FROM model_calls WHERE session_id = ? ORDER BY seq", (session_id,))
+        return [{**row, "prefix": json.loads(row["prefix"])} for row in rows]
 
     def next_note_id(self, session_id: str) -> str:
         count = self._query("SELECT COUNT(*) AS n FROM memory_entries WHERE session_id = ? AND kind = 'note'",
