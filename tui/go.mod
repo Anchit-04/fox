@@ -1,4 +1,4 @@
-module tui
+module fox/tui
 
 go 1.26.2
 
