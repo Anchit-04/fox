@@ -4,7 +4,9 @@ import time
 
 from events import emit
 from providers import ProviderResponse, Turn
-from providers.config import call_cost
+from providers.config import call_cost, get_provider
+
+PAUSE_KINDS = {401: "key", 403: "key", 402: "credits", 404: "model", 429: "rate_limit"}
 
 
 def _digest(value) -> str:
@@ -42,3 +44,31 @@ def timed_generate(provider, turns: list[Turn], tools: list[dict], system_prompt
         "cost": cost, "cost_source": cost_source, "prefix": prefix,
     })
     return response
+
+
+def model_error_kind(error: Exception) -> str | None:
+    status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    if not isinstance(status, int):
+        return None
+    if status >= 500:
+        return "provider"
+    return PAUSE_KINDS.get(status)
+
+
+def generate_or_pause(provider, history, tools: list[dict], system_prompt: str, *, model_key: str,
+                      task_id: str | None, event_sink, injection_queue):
+    while True:
+        try:
+            return provider, timed_generate(provider, history.turns, tools, system_prompt, model_key=model_key,
+                                            task_id=task_id, event_sink=event_sink)
+        except Exception as error:
+            kind = model_error_kind(error)
+            if kind is None or injection_queue is None:
+                raise
+            emit(event_sink, "model_error", {"task_id": task_id, "model_key": model_key, "kind": kind,
+                                             "message": str(error)})
+            messages = injection_queue.wait_for_message(task_id)
+            if messages is None:
+                raise
+            history.add_human_messages(messages, task_id, event_sink)
+            provider = get_provider(model_key)

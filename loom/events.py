@@ -25,6 +25,7 @@ EVENTS: dict[str, frozenset[str]] = {
     "human_message_injected": frozenset({"task_id", "content"}),
     "approval_requested": frozenset({"request_id", "tool_name", "args", "reason", "description"}),
     "error": frozenset({"task_id", "message"}),
+    "model_error": frozenset({"task_id", "model_key", "kind", "message"}),
     "model_called": frozenset({"task_id", "model_key", "duration_ms", "input_tokens", "output_tokens",
                                "cache_read_tokens", "cache_write_tokens", "cost", "cost_source", "prefix"}),
 }
