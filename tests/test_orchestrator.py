@@ -471,10 +471,35 @@ class OrchestratorTests(unittest.TestCase):
     def test_injected_message_reaches_the_orchestrator(self):
         queue = InjectionQueue()
         queue.push(None, "use click, not argparse")
+        queue.close(None)
         model = ScriptedModel(done())
         self.run_with(model, injection_queue=queue)
         texts = [t.text for t in model.requests[0]["history"]]
         self.assertIn("[Message from human]: use click, not argparse", texts)
+
+    def test_a_finished_answer_waits_for_the_next_message(self):
+        queue = InjectionQueue()
+
+        def first():
+            queue.push(None, "now list the tests")
+            return done("Here is the project.")
+
+        def second():
+            queue.close(None)
+            return done("Here are the tests.")
+
+        model = ScriptedModel(first, second)
+        final = self.run_with(model, injection_queue=queue)
+        self.assertEqual(final, "Here are the tests.")
+        self.assertEqual(len(model.requests), 2)
+        texts = [t.text for t in model.requests[1]["history"]]
+        self.assertEqual(texts[-2:], ["Here is the project.", "[Message from human]: now list the tests"])
+        self.assertEqual(model.requests[1]["history"][-2].role, "assistant")
+
+    def test_without_a_queue_a_finished_answer_still_ends_the_run(self):
+        model = ScriptedModel(done("Only answer."))
+        self.assertEqual(self.run_with(model), "Only answer.")
+        self.assertEqual(len(model.requests), 1)
 
     def test_final_text_is_the_last_thing_said(self):
         model = ScriptedModel(reply(delegate("a", "x"), text="Starting."), wait(), done("Finished."))
