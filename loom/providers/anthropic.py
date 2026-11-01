@@ -8,10 +8,11 @@ models that don't need Claude) still work without this package installed.
 
 import time
 
-from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn, Usage
 
 MAX_RETRIES = 5
 MAX_TOKENS = 16000
+CACHE = {"type": "ephemeral"}
 
 
 class AnthropicProvider(Provider):
@@ -37,9 +38,10 @@ class AnthropicProvider(Provider):
         response = self._create_with_retry(
             model=self.model_id,
             max_tokens=MAX_TOKENS,
-            system=system_prompt,
+            system=[{"type": "text", "text": system_prompt, "cache_control": CACHE}],
             messages=messages,
             tools=anthropic_tools,
+            cache_control=CACHE,
         )
         if response.stop_reason == "refusal":
             category = response.stop_details.category if response.stop_details else None
@@ -50,7 +52,8 @@ class AnthropicProvider(Provider):
             ToolCall(id=b.id, name=b.name, args=b.input)
             for b in response.content if b.type == "tool_use"
         ]
-        return ProviderResponse(text=text, tool_calls=tool_calls, raw=list(response.content))
+        return ProviderResponse(text=text, tool_calls=tool_calls, raw=list(response.content),
+                                usage=_usage(getattr(response, "usage", None)))
 
     def _create_with_retry(self, **kwargs):
         a = self._anthropic
@@ -66,6 +69,17 @@ class AnthropicProvider(Provider):
                 reason = "Rate limited" if isinstance(e, a.RateLimitError) else f"Server error ({e.status_code})"
                 print(f"\033[91m{reason}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...\033[0m")
                 time.sleep(wait)
+
+
+def _usage(usage) -> Usage:
+    if usage is None:
+        return Usage()
+    return Usage(
+        input_tokens=usage.input_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_write_tokens=usage.cache_creation_input_tokens or 0,
+    )
 
 
 def _to_anthropic_messages(history: list) -> list:

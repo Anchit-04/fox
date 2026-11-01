@@ -6,6 +6,7 @@ import permissions
 from agent import ALL_TOOLS, IDENTITY, run_tool_call
 from events import emit
 from approval import DenyApprover
+from calls import timed_generate
 from config import preferences, routing
 import context
 from context import MAX_ITERATIONS, build_compact_input
@@ -30,6 +31,7 @@ What to do yourself and what to delegate:
 How work runs:
 - delegate_task starts one task in the background and returns at once with its id. You keep working while it runs.
 - When a task finishes, its result arrives as a "[task finished]" message before your next turn.
+- Notes that agents leave in shared memory arrive the same way, as a "[memory]" message.
 - Hand off independent pieces first, then do your own part, so the executors work while you do.
 - Call wait_for_tasks when you have nothing else to do until a result arrives.
 - "read" tasks only investigate and cannot modify anything.
@@ -152,6 +154,7 @@ class _Run:
     claims: FileClaims = field(default_factory=FileClaims)
     inbox: TaskInbox = field(default_factory=TaskInbox)
     running: dict[str, Task] = field(default_factory=dict)
+    notes_seen: int = 0
 
 
 def _system_prompt(run: _Run) -> str:
@@ -162,8 +165,15 @@ def _system_prompt(run: _Run) -> str:
             "say what you would change and ask the user to switch the session to a writable mode.\n"
         )
     parts.append("\n## Executor specialties\n" + preferences.render_for_prompt())
-    parts.append("\n\n## Shared memory index\n" + run.mem.read_index())
     return "".join(parts)
+
+
+def _new_notes(run: _Run) -> str:
+    notes = run.mem.notes(skip=run.notes_seen)
+    run.notes_seen += len(notes)
+    if not notes:
+        return ""
+    return "[memory] New notes in shared memory (memory_read shows one in full):\n" + "\n".join(notes)
 
 
 def _run_own(tc, run: _Run) -> str:
@@ -239,15 +249,18 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
     file_tools.clear_approved_paths()
 
     history = History(task)
+    system_prompt = _system_prompt(run)
     final_text = ""
     turns = 0
     try:
         while True:
             if injection_queue is not None:
                 history.add_human_messages(injection_queue.drain(None), None, event_sink)
-            _deliver(history, run, _finished_text(run, run.inbox.drain()))
+            arrived = (_finished_text(run, run.inbox.drain()), _new_notes(run))
+            _deliver(history, run, "\n\n".join(text for text in arrived if text))
 
-            response = provider.generate(history.turns, tools, _system_prompt(run))
+            response = timed_generate(provider, history.turns, tools, system_prompt, model_key=model_key,
+                                      task_id=None, event_sink=event_sink)
 
             if response.text:
                 final_text = response.text

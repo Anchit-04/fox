@@ -102,6 +102,65 @@ class EmptyCompletion(unittest.TestCase):
         result = self.generate_with(SimpleNamespace(choices=[SimpleNamespace(message=message)]))
         self.assertEqual((result.text, result.tool_calls), ("hi", []))
 
+    def completion_with_usage(self, **usage):
+        message = SimpleNamespace(content="hi", tool_calls=None)
+        return self.generate_with(SimpleNamespace(choices=[SimpleNamespace(message=message)],
+                                                  usage=SimpleNamespace(**usage))).usage
+
+    def test_cached_tokens_are_taken_out_of_the_input(self):
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7,
+                                           prompt_tokens_details=SimpleNamespace(cached_tokens=900))
+        self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens), (100, 7, 900))
+        self.assertEqual(usage.prompt_tokens, 1000)
+
+    def test_openrouter_cache_writes_are_taken_out_of_the_input(self):
+        details = SimpleNamespace(cached_tokens=600, cache_write_tokens=300)
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_tokens_details=details)
+        self.assertEqual((usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (100, 600, 300))
+        self.assertEqual(usage.prompt_tokens, 1000)
+
+    def test_deepseek_cache_hits_are_read(self):
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_cache_hit_tokens=600)
+        self.assertEqual((usage.input_tokens, usage.cache_read_tokens), (400, 600))
+
+    def test_no_cache_details_means_no_cache(self):
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, prompt_tokens_details=None)
+        self.assertEqual((usage.input_tokens, usage.cache_read_tokens), (1000, 0))
+
+    def test_openrouter_bill_is_kept(self):
+        usage = self.completion_with_usage(prompt_tokens=1000, completion_tokens=7, cost=0.0042)
+        self.assertEqual(usage.reported_cost, 0.0042)
+
+    def test_no_bill_means_no_reported_cost(self):
+        self.assertIsNone(self.completion_with_usage(prompt_tokens=1000, completion_tokens=7).reported_cost)
+
+    def test_no_usage_reported_is_zero(self):
+        self.assertEqual(self.generate_with(SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="hi", tool_calls=None))])).usage.prompt_tokens, 0)
+
+
+class GeminiUsage(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"FAKE_KEY": "k"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.provider = GeminiProvider("m", "FAKE_KEY")
+
+    def usage_of(self, meta):
+        response = SimpleNamespace(candidates=[], text="hi", usage_metadata=meta)
+        with mock.patch.object(self.provider._client.models, "generate_content", return_value=response):
+            return self.provider.generate([Turn(role="user", text="hi")], [], "system").usage
+
+    def test_cached_tokens_are_taken_out_and_thinking_counts_as_output(self):
+        usage = self.usage_of(SimpleNamespace(prompt_token_count=1000, cached_content_token_count=900,
+                                              candidates_token_count=7, thoughts_token_count=30))
+        self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens), (100, 37, 900))
+
+    def test_missing_counts_are_zero(self):
+        usage = self.usage_of(SimpleNamespace(prompt_token_count=50, cached_content_token_count=None,
+                                              candidates_token_count=None, thoughts_token_count=None))
+        self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens), (50, 0, 0))
+
 
 def anthropic_message(*content, stop_reason="end_turn", stop_details=None):
     return SimpleNamespace(content=list(content), stop_reason=stop_reason, stop_details=stop_details)
@@ -166,6 +225,28 @@ class AnthropicAdapter(unittest.TestCase):
     def test_leaves_room_for_thinking(self):
         self.generate_with(anthropic_message())
         self.assertGreaterEqual(self.sent[0]["max_tokens"], 16000)
+
+    def test_tools_and_system_are_cached_and_the_history_follows(self):
+        self.generate_with(anthropic_message())
+        sent = self.sent[0]
+        self.assertEqual(sent["system"], [{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}])
+        self.assertEqual(sent["cache_control"], {"type": "ephemeral"})
+
+    def test_usage_is_reported(self):
+        message = anthropic_message()
+        message.usage = SimpleNamespace(input_tokens=40, output_tokens=7, cache_read_input_tokens=900,
+                                        cache_creation_input_tokens=60)
+        usage = self.generate_with(message).usage
+        self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens),
+                         (40, 7, 900, 60))
+        self.assertEqual(usage.prompt_tokens, 1000)
+
+    def test_missing_cache_counts_are_zero(self):
+        message = anthropic_message()
+        message.usage = SimpleNamespace(input_tokens=40, output_tokens=7, cache_read_input_tokens=None,
+                                        cache_creation_input_tokens=None)
+        usage = self.generate_with(message).usage
+        self.assertEqual((usage.cache_read_tokens, usage.cache_write_tokens), (0, 0))
 
     def failing_then(self, *errors):
         import anthropic

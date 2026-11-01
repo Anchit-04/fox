@@ -222,6 +222,24 @@ class Projections(StoreCase):
                                    "get_user is called in api.py", self.ts(note)))
         self.assertEqual(rows[1][:5], ("t1", "t1", "gemini-lite", "task_result", '["a.py"]'))
 
+    def test_a_model_call_becomes_a_row(self):
+        prefix = {"tools": "aa11", "system": "bb22", "messages": ["cc33", "dd44"]}
+        seq = self.emit("model_called", task_id="t1", model_key="claude-haiku", duration_ms=1840, input_tokens=120,
+                        output_tokens=45, cache_read_tokens=3000, cache_write_tokens=200, cost=0.00012,
+                        cost_source="catalog", prefix=prefix)
+        [call] = self.store.model_calls("s1")
+        self.assertEqual(call, {"session_id": "s1", "seq": seq, "task_id": "t1", "model_key": "claude-haiku",
+                                "duration_ms": 1840, "input_tokens": 120, "output_tokens": 45,
+                                "cache_read_tokens": 3000, "cache_write_tokens": 200, "cost": 0.00012,
+                                "cost_source": "catalog", "prefix": prefix, "ended_at": self.ts(seq)})
+
+    def test_a_model_call_with_unknown_cost_is_kept(self):
+        self.emit("model_called", task_id=None, model_key="deepseek-chat", duration_ms=900, input_tokens=10,
+                  output_tokens=2, cache_read_tokens=0, cache_write_tokens=0, cost=None, cost_source=None,
+                  prefix={})
+        [call] = self.store.model_calls("s1")
+        self.assertEqual((call["task_id"], call["cost"], call["cost_source"]), (None, None, None))
+
     def test_a_duplicate_memory_id_is_refused_and_not_logged(self):
         self.emit("memory_written", task_id=None, entry_id="note_1", agent="a", kind="note", scope=[], content="x")
         with self.assertRaises(sqlite3.IntegrityError):
@@ -242,6 +260,9 @@ class Rebuild(StoreCase):
                                      "model_key": "gemini-lite"}),
             ("memory_written", {"task_id": "t1", "entry_id": "note_1", "agent": "gemini-lite", "kind": "note",
                                 "scope": [], "content": "two callers"}),
+            ("model_called", {"task_id": "t1", "model_key": "gemini-lite", "duration_ms": 700, "input_tokens": 90,
+                              "output_tokens": 12, "cache_read_tokens": 400, "cache_write_tokens": 0, "cost": 0.0,
+                              "cost_source": "catalog", "prefix": {"tools": "a", "system": "b", "messages": ["c"]}}),
             ("tool_call", {"task_id": "t1", "name": "read_file", "args": {"path": "a.py"}}),
             ("task_status_changed", {"task_id": "t1", "status": "done", "error": None, "model_key": None,
                                      "report": {"outcome": "2 callers", "changes": [], "validation": "read",
@@ -263,12 +284,13 @@ class Rebuild(StoreCase):
                 "tasks": db.execute("SELECT * FROM tasks WHERE session_id = 's1' ORDER BY task_id").fetchall(),
                 "memory": db.execute("SELECT * FROM memory_entries WHERE session_id = 's1' "
                                      "ORDER BY entry_id").fetchall(),
+                "calls": db.execute("SELECT * FROM model_calls WHERE session_id = 's1' ORDER BY seq").fetchall(),
             }
 
     def test_rebuilding_gives_identical_tables(self):
         self.play()
         before = self.snapshot()
-        self.assertEqual((len(before["tasks"]), len(before["memory"])), (2, 2))
+        self.assertEqual((len(before["tasks"]), len(before["memory"]), len(before["calls"])), (2, 2, 1))
         self.store.rebuild("s1")
         self.assertEqual(self.snapshot(), before)
 
@@ -278,6 +300,7 @@ class Rebuild(StoreCase):
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("UPDATE tasks SET status = 'cancelled', error = 'tampered' WHERE task_id = 't1'")
             db.execute("DELETE FROM memory_entries WHERE entry_id = 'note_1'")
+            db.execute("UPDATE model_calls SET cost = 9.99")
             db.commit()
         self.assertNotEqual(self.snapshot(), before)
         self.store.rebuild("s1")

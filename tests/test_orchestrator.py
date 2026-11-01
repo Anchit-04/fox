@@ -186,6 +186,41 @@ class OrchestratorTests(unittest.TestCase):
         self.run_with(model)
         self.assertEqual(notes, [True])
 
+    def test_the_system_prompt_never_changes_during_a_run(self):
+        def notes_then_report(text, **kw):
+            kw["mem"].add_note("fake-exec", f"found something for {text.splitlines()[0]}")
+            executor(text, **kw)
+        self.patch(dispatch, "run_agent", notes_then_report)
+        model = ScriptedModel(
+            reply(delegate("a", "one"), ToolCall("m", "memory_write", {"content": "my own note"})),
+            wait(),
+            reply(delegate("b", "two")),
+            wait("w2"),
+            done(),
+        )
+        self.run_with(model)
+        self.assertEqual(len(self.mem.notes()), 3)
+        self.assertEqual(len({r["prompt"] for r in model.requests}), 1)
+        self.assertNotIn("found something", model.requests[-1]["prompt"])
+
+    def test_new_notes_arrive_once_as_a_message(self):
+        self.mem.add_note("someone-earlier", "the tests use unittest")
+
+        def notes_then_report(text, **kw):
+            kw["mem"].add_note("fake-exec", "cli.py has no argparse yet")
+            executor(text, **kw)
+        self.patch(dispatch, "run_agent", notes_then_report)
+        model = ScriptedModel(reply(delegate("a", "look around")), wait(), reply(ToolCall("r", "read_file",
+                              {"path": "cli.py"})), done())
+        self.file_handler("read_file", lambda args: "print('hi')")
+        self.run_with(model)
+        first, after_task, later = (seen(model.requests[i]) for i in (0, 2, 3))
+        self.assertIn("[memory] New notes", first)
+        self.assertIn("id=note_1 agent=someone-earlier", first)
+        self.assertIn("id=note_2 agent=fake-exec", after_task)
+        self.assertEqual(later.count("id=note_2"), 1)
+        self.assertEqual(later.count("id=note_1"), 1)
+
     def test_orchestrator_gets_every_tool_plus_delegation(self):
         model = ScriptedModel(done())
         self.run_with(model)

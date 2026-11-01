@@ -44,6 +44,10 @@ class Memory:
         lines = [_header(entry) for entry in self.store.memory_entries(self.session_id)]
         return "\n".join(lines) if lines else "(empty)"
 
+    def notes(self, skip: int = 0) -> list[str]:
+        entries = [entry for entry in self.store.memory_entries(self.session_id) if entry["kind"] == "note"]
+        return [_header(entry) for entry in entries[skip:]]
+
     def read_entry(self, entry_id: str) -> str:
         entry = self.store.memory_entry(self.session_id, entry_id)
         if entry is None:
@@ -83,10 +87,10 @@ MEMORY_WRITE_TOOL = {
 MEMORY_READ_TOOL = {
     "type": "function",
     "name": "memory_read",
-    "description": "Read a full shared memory entry by id (ids are shown in the index in your system prompt).",
+    "description": "Read a full shared memory entry by id: a task id such as t3, or a note id such as note_2.",
     "parameters": {
         "type": "object",
-        "properties": {"entry_id": {"type": "string", "description": "Entry id, exactly as shown in the index."}},
+        "properties": {"entry_id": {"type": "string", "description": "Entry id, exactly as shown."}},
         "required": ["entry_id"],
     },
 }

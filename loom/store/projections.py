@@ -70,6 +70,18 @@ def _memory_written(db: sqlite3.Connection, session_id: str, seq: int, ts: str, 
     )
 
 
+def _model_called(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
+    db.execute(
+        "INSERT INTO model_calls (session_id, seq, task_id, model_key, duration_ms, input_tokens, output_tokens, "
+        "cache_read_tokens, cache_write_tokens, cost, cost_source, prefix, ended_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (session_id, seq, payload.get("task_id"), payload["model_key"], payload["duration_ms"],
+         payload["input_tokens"], payload["output_tokens"], payload["cache_read_tokens"],
+         payload["cache_write_tokens"], payload.get("cost"), payload.get("cost_source"),
+         json.dumps(payload.get("prefix") or {}), ts),
+    )
+
+
 HANDLERS = {
     "session_started": _session_started,
     "session_ended": _session_ended,
@@ -78,6 +90,7 @@ HANDLERS = {
     "task_created": _task_created,
     "task_status_changed": _task_status_changed,
     "memory_written": _memory_written,
+    "model_called": _model_called,
 }
 
 

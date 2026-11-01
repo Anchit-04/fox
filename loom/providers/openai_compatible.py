@@ -12,7 +12,7 @@ import time
 
 from openai import InternalServerError, OpenAI, RateLimitError
 
-from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn
+from .base import REQUEST_TIMEOUT_SECONDS, Provider, ProviderResponse, ToolCall, Turn, Usage
 
 MAX_RETRIES = 5
 
@@ -54,7 +54,8 @@ class OpenAICompatibleProvider(Provider):
                 ))
                 continue
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, args=args))
-        return ProviderResponse(text=choice.content, tool_calls=tool_calls)
+        return ProviderResponse(text=choice.content, tool_calls=tool_calls,
+                                usage=_usage(getattr(response, "usage", None)))
 
     def _create_with_retry(self, **kwargs):
         for attempt in range(MAX_RETRIES):
@@ -81,6 +82,20 @@ TRANSIENT_CODES = {429, 502, 503}
 def _is_transient(response) -> bool:
     error = getattr(response, "error", None)
     return isinstance(error, dict) and error.get("code") in TRANSIENT_CODES
+
+
+def _usage(usage) -> Usage:
+    if usage is None:
+        return Usage()
+    prompt = usage.prompt_tokens or 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = (getattr(details, "cached_tokens", None) or getattr(usage, "prompt_cache_hit_tokens", None)
+              or 0)
+    written = getattr(details, "cache_write_tokens", None) or 0
+    cost = getattr(usage, "cost", None)
+    return Usage(input_tokens=prompt - cached - written, output_tokens=usage.completion_tokens or 0,
+                 cache_read_tokens=cached, cache_write_tokens=written,
+                 reported_cost=float(cost) if isinstance(cost, (int, float)) else None)
 
 
 def _to_openai_messages(history: list) -> list:
