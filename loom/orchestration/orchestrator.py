@@ -6,7 +6,7 @@ import permissions
 from agent import ALL_TOOLS, IDENTITY, run_tool_call
 from events import emit
 from approval import DenyApprover
-from calls import timed_generate
+from calls import generate_or_pause
 from config import preferences, routing
 import context
 from context import MAX_ITERATIONS, build_compact_input
@@ -259,15 +259,23 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
             arrived = (_finished_text(run, run.inbox.drain()), _new_notes(run))
             _deliver(history, run, "\n\n".join(text for text in arrived if text))
 
-            response = timed_generate(provider, history.turns, tools, system_prompt, model_key=model_key,
-                                      task_id=None, event_sink=event_sink)
+            provider, response = generate_or_pause(provider, history, tools, system_prompt, model_key=model_key,
+                                                   task_id=None, event_sink=event_sink,
+                                                   injection_queue=injection_queue)
 
             if response.text:
                 final_text = response.text
                 emit(event_sink, "agent_turn", {"task_id": None, "model_key": model_key, "text": response.text})
             if not response.tool_calls:
                 if not run.running:
-                    break
+                    if injection_queue is None:
+                        break
+                    history.add(Turn(role="assistant", text=response.text or "(no reply)", raw=response.raw))
+                    messages = injection_queue.wait_for_message(None)
+                    if messages is None:
+                        break
+                    history.add_human_messages(messages, None, event_sink)
+                    continue
                 history.add(Turn(role="assistant", text=response.text or "(waiting for running tasks)",
                                  raw=response.raw))
                 _deliver(history, run, _wait(run) + "\n\nTasks were still running, so you cannot finish yet. "

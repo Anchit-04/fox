@@ -1,10 +1,13 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
-from calls import prefix_digest, timed_generate
+from calls import generate_or_pause, model_error_kind, prefix_digest, timed_generate
+from history import History
+from injection import InjectionQueue
 from providers import ProviderResponse, ToolCall, ToolResult, Turn, Usage
 
 TOOLS = [{"type": "function", "name": "read_file", "description": "Read a file.",
@@ -66,6 +69,73 @@ class TimedGenerate(unittest.TestCase):
         response = timed_generate(FakeProvider(), conversation(), TOOLS, "s", model_key="m", task_id=None,
                                   event_sink=None)
         self.assertEqual(response.text, "ok")
+
+
+class StatusError(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"Error code: {status_code}")
+        self.status_code = status_code
+
+
+class FailsOnce:
+    def __init__(self, error):
+        self.error = error
+
+    def generate(self, history, tools, system_prompt):
+        raise self.error
+
+
+class ModelErrorKind(unittest.TestCase):
+    def test_fixable_statuses_have_a_kind(self):
+        kinds = {code: model_error_kind(StatusError(code)) for code in (401, 403, 402, 404, 429, 503)}
+        self.assertEqual(kinds, {401: "key", 403: "key", 402: "credits", 404: "model", 429: "rate_limit",
+                                 503: "provider"})
+
+    def test_a_gemini_style_code_counts(self):
+        error = Exception("expired")
+        error.code = 401
+        self.assertEqual(model_error_kind(error), "key")
+
+    def test_other_errors_have_no_kind(self):
+        self.assertIsNone(model_error_kind(StatusError(400)))
+        self.assertIsNone(model_error_kind(TimeoutError("slow")))
+
+
+class GenerateOrPause(unittest.TestCase):
+    def call(self, provider, queue):
+        events = []
+        history = History("rename get_user")
+        with mock.patch("calls.get_provider", return_value=FakeProvider()) as rebuilt:
+            result = generate_or_pause(provider, history, TOOLS, "s", model_key="nemotron-super", task_id=None,
+                                       event_sink=lambda e, p: events.append((e, p)), injection_queue=queue)
+        return result, history, events, rebuilt
+
+    def test_a_dead_key_pauses_until_a_message_then_retries_with_a_fresh_provider(self):
+        queue = InjectionQueue()
+        queue.push(None, "retry")
+        (provider, response), history, events, rebuilt = self.call(FailsOnce(StatusError(401)), queue)
+        self.assertEqual(response.text, "ok")
+        self.assertIs(provider, rebuilt.return_value)
+        rebuilt.assert_called_once_with("nemotron-super")
+        self.assertEqual([e for e, _ in events], ["model_error", "human_message_injected", "model_called"])
+        self.assertEqual(events[0][1]["kind"], "key")
+        self.assertEqual(history.turns[-1].text, "[Message from human]: retry")
+
+    def test_without_a_queue_the_error_still_ends_the_run(self):
+        with self.assertRaises(StatusError):
+            self.call(FailsOnce(StatusError(401)), None)
+
+    def test_an_unfixable_error_is_not_paused_on(self):
+        queue = InjectionQueue()
+        queue.push(None, "retry")
+        with self.assertRaises(StatusError):
+            self.call(FailsOnce(StatusError(400)), queue)
+
+    def test_closing_the_session_while_paused_raises_the_original_error(self):
+        queue = InjectionQueue()
+        queue.close(None)
+        with self.assertRaises(StatusError):
+            self.call(FailsOnce(StatusError(402)), queue)
 
 
 class PrefixDigest(unittest.TestCase):

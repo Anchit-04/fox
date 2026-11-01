@@ -25,7 +25,7 @@ from sandbox.sandbox_client import run_bash_command
 import memory
 from events import EventSink, emit
 from history import History
-from calls import timed_generate
+from calls import generate_or_pause
 
 MODEL_KEY = "gemini-flash"          # default entry in providers/config.py's MODEL_REGISTRY
 
@@ -233,8 +233,9 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     while True:
         if injection_queue is not None:
             history.add_human_messages(injection_queue.drain(task_id), task_id, event_sink)
-        response = timed_generate(provider, history.turns, tools, system_prompt, model_key=model_key,
-                                  task_id=task_id, event_sink=event_sink)
+        provider, response = generate_or_pause(provider, history, tools, system_prompt, model_key=model_key,
+                                               task_id=task_id, event_sink=event_sink,
+                                               injection_queue=injection_queue if keep_alive else None)
 
         if response.text:
             final_text = response.text
@@ -248,6 +249,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 # turn," not "session over." Block here for the next message
                 # instead of ending; only close() (an explicit end-of-session
                 # signal) or a real disconnect-driven close should end this.
+                history.add(Turn(role="assistant", text=response.text or "(no reply)", raw=response.raw))
                 messages = injection_queue.wait_for_message(task_id)
                 if messages is None:
                     break
