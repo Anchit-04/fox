@@ -27,6 +27,12 @@ type ErrorPayload struct {
 	Message string `json:"message"`
 }
 
+type ModelErrorPayload struct {
+	ModelKey string `json:"model_key"`
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+}
+
 type ToolCallPayload struct {
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`

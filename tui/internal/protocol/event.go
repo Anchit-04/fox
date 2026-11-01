@@ -19,6 +19,7 @@ const (
 	HumanMessageInjected = "human_message_injected"
 	ApprovalRequested    = "approval_requested"
 	Error                = "error"
+	ModelError           = "model_error"
 	ModelCalled          = "model_called"
 
 	Attached           = "attached"
