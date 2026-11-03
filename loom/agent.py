@@ -250,6 +250,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 # instead of ending; only close() (an explicit end-of-session
                 # signal) or a real disconnect-driven close should end this.
                 history.add(Turn(role="assistant", text=response.text or "(no reply)", raw=response.raw))
+                emit(event_sink, "awaiting_input", {"task_id": task_id})
                 messages = injection_queue.wait_for_message(task_id)
                 if messages is None:
                     break

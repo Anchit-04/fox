@@ -23,6 +23,7 @@ EVENTS: dict[str, frozenset[str]] = {
     "proposal_made": frozenset({"task_id", "text"}),
     "scope_audit": frozenset({"task_id", "lane", "declared", "written", "undeclared", "unused", "mispredicted"}),
     "human_message_injected": frozenset({"task_id", "content"}),
+    "awaiting_input": frozenset({"task_id"}),
     "approval_requested": frozenset({"request_id", "tool_name", "args", "reason", "description"}),
     "error": frozenset({"task_id", "message"}),
     "model_error": frozenset({"task_id", "model_key", "kind", "message"}),
