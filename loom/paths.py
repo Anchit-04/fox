@@ -24,22 +24,28 @@ def workspace() -> Path:
     return _workspace
 
 
-def set_workspace(path: str | Path, allow_unsafe: bool = False) -> Path:
-    """Validate and install the workspace. Call once at startup, before any
-    agent runs. Fails loudly here so a bad path can't surface later as a
-    mid-session tool error."""
-    global _workspace
+def validate_workspace(path: str | Path, allow_unsafe: bool = False) -> Path:
     resolved = Path(path).expanduser().resolve()
-
     if not resolved.exists():
         raise WorkspaceError(f"Workspace does not exist: {resolved}")
     if not resolved.is_dir():
         raise WorkspaceError(f"Workspace is not a directory: {resolved}")
     if not allow_unsafe:
         _reject_dangerous(resolved)
-
-    _workspace = resolved
     return resolved
+
+
+def set_workspace(path: str | Path, allow_unsafe: bool = False) -> Path:
+    """Validate and install the workspace. Call once at startup, before any
+    agent runs. Fails loudly here so a bad path can't surface later as a
+    mid-session tool error."""
+    global _workspace
+    _workspace = validate_workspace(path, allow_unsafe)
+    return _workspace
+
+
+def workspace_key(path: str | Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
 
 
 def _reject_dangerous(path: Path) -> None:
