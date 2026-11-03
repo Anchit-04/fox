@@ -348,5 +348,57 @@ class ReadOnly(StoreCase):
             Store.open(empty, readonly=True)
 
 
+class OpeningWithoutMigrating(StoreCase):
+    def test_a_current_database_opens_and_can_be_written(self):
+        worker = Store.open(self.path, migrate=False)
+        self.addCleanup(worker.close)
+        self.assertEqual(worker.append_event("s1", "session_started", started()), 1)
+
+    def test_an_old_database_is_refused_and_left_alone(self):
+        old = self.path.with_name("old.db")
+        with closing(sqlite3.connect(old)) as db:
+            db.executescript(MIGRATIONS[0])
+            db.execute("PRAGMA user_version = 1")
+        with self.assertRaises(StoreError):
+            Store.open(old, migrate=False)
+        with closing(sqlite3.connect(old)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+
+
+class ProjectsAndSessions(StoreCase):
+    def setUp(self):
+        super().setUp()
+        clock = (f"2026-11-03T10:00:{second:02d}.000Z" for second in range(60))
+        patcher = mock.patch("store._now", lambda: next(clock))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.start("a1", workspace=r"C:\Users\me\Desktop\shop")
+        self.start("side", workspace=r"C:\Users\me\Desktop\shop", parent_id="a1")
+        self.start("b1", workspace=r"C:\Users\me\code\api")
+        self.store.append_event("b1", "session_ended", {"status": "done", "final_text": "ok"})
+        self.start("a2", workspace=r"C:\Users\me\desktop\shop")
+
+    def test_a_project_is_a_folder_and_case_does_not_split_it_on_windows(self):
+        projects = self.store.projects()
+        if sys.platform != "win32":
+            self.skipTest("folder names are case-sensitive here")
+        self.assertEqual([(p["name"], p["sessions"], p["running"]) for p in projects],
+                         [("shop", 2, 2), ("api", 1, 0)])
+        self.assertEqual(projects[0]["path"], r"C:\Users\me\desktop\shop")
+
+    def test_most_recent_project_first_and_limit_for_the_sidebar(self):
+        self.store.append_event("b1", "error", {"task_id": None, "message": "x"})
+        self.start("b2", workspace=r"C:\Users\me\code\api")
+        self.assertEqual([p["name"] for p in self.store.projects()][0], "api")
+        self.assertEqual(len(self.store.projects(limit=1)), 1)
+
+    def test_sessions_newest_first_and_filtered_by_project(self):
+        self.assertEqual([s["session_id"] for s in self.store.sessions()], ["a2", "b1", "side", "a1"])
+        shop = [s["session_id"] for s in self.store.sessions(project=r"c:\users\me\DESKTOP\shop")]
+        self.assertEqual(shop, ["a2", "side", "a1"] if sys.platform == "win32" else [])
+        self.assertEqual(len(self.store.sessions(limit=2)), 2)
+        self.assertEqual(self.store.sessions(project=r"C:\Users\me\code\api")[0]["status"], "done")
+
+
 if __name__ == "__main__":
     unittest.main()

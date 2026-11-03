@@ -5,8 +5,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from paths import workspace_key
+
 from . import projections
-from .migrations import MIGRATIONS, StoreError, migrate, version
+from .migrations import MIGRATIONS, StoreError, migrate as run_migrations, version
 
 
 def _now() -> str:
@@ -20,18 +22,13 @@ class Store:
         self._lock = threading.Lock()
 
     @classmethod
-    def open(cls, path: str | Path, readonly: bool = False) -> "Store":
+    def open(cls, path: str | Path, readonly: bool = False, migrate: bool = True) -> "Store":
         path = Path(path)
         if readonly:
             if not path.exists():
                 raise StoreError(f"{path} does not exist yet. Start the server once to create it.")
             db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
                                  check_same_thread=False, isolation_level=None)
-            found = version(db)
-            if found != len(MIGRATIONS):
-                db.close()
-                raise StoreError(f"{path} is at schema version {found}, but this Fox expects {len(MIGRATIONS)}. "
-                                 "Start the server once to upgrade it.")
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -39,8 +36,14 @@ class Store:
             db.execute("PRAGMA synchronous = NORMAL")
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("PRAGMA busy_timeout = 5000")
-        if not readonly:
-            migrate(db)
+        if readonly or not migrate:
+            found = version(db)
+            if found != len(MIGRATIONS):
+                db.close()
+                raise StoreError(f"{path} is at schema version {found}, but this Fox expects {len(MIGRATIONS)}. "
+                                 "Start the server once to upgrade it.")
+        else:
+            run_migrations(db)
         return cls(db, readonly)
 
     @contextmanager
@@ -120,6 +123,28 @@ class Store:
     def model_calls(self, session_id: str) -> list[dict]:
         rows = self._query("SELECT * FROM model_calls WHERE session_id = ? ORDER BY seq", (session_id,))
         return [{**row, "prefix": json.loads(row["prefix"])} for row in rows]
+
+    def projects(self, limit: int | None = None) -> list[dict]:
+        rows = self._query(
+            "SELECT workspace_key, "
+            "(SELECT workspace FROM sessions latest WHERE latest.workspace_key = s.workspace_key "
+            "ORDER BY started_at DESC LIMIT 1) AS path, "
+            "COUNT(*) AS sessions, SUM(status = 'running') AS running, "
+            "MAX(MAX(started_at, COALESCE(ended_at, started_at))) AS last_active "
+            "FROM sessions s WHERE parent_id IS NULL GROUP BY workspace_key ORDER BY last_active DESC LIMIT ?",
+            (-1 if limit is None else limit,))
+        return [{"path": row["path"], "name": Path(row["path"]).name, "sessions": row["sessions"],
+                 "running": row["running"], "last_active": row["last_active"]} for row in rows]
+
+    def sessions(self, project: str | None = None, limit: int | None = None) -> list[dict]:
+        sql = ("SELECT id AS session_id, parent_id, workspace, task, mode, permission_mode, model_key, status, "
+               "started_at, ended_at FROM sessions")
+        params: list = []
+        if project is not None:
+            sql += " WHERE workspace_key = ?"
+            params.append(workspace_key(project))
+        params.append(-1 if limit is None else limit)
+        return self._query(sql + " ORDER BY started_at DESC LIMIT ?", tuple(params))
 
     def next_note_id(self, session_id: str) -> str:
         count = self._query("SELECT COUNT(*) AS n FROM memory_entries WHERE session_id = ? AND kind = 'note'",

@@ -43,9 +43,20 @@ class Migrate(unittest.TestCase):
         db.execute("INSERT INTO sessions (id, workspace, task, mode, permission_mode, started_at) "
                    "VALUES ('old', 'w', 't', 'orchestrator', 'workspace-write', 'then')")
         self.assertNotIn("model_calls", tables(db))
-        self.assertEqual(migrate(db), 2)
+        self.assertEqual(migrate(db), len(MIGRATIONS))
         self.assertIn("model_calls", tables(db))
         self.assertEqual(db.execute("SELECT task FROM sessions WHERE id = 'old'").fetchone(), ("t",))
+
+    def test_existing_sessions_get_a_workspace_key_that_ignores_case_on_windows(self):
+        db = fresh()
+        with mock.patch.object(migrations, "MIGRATIONS", MIGRATIONS[:2]):
+            migrate(db)
+        for session_id, workspace in (("a", "C:/Users/me/Desktop/fixture"), ("b", "C:/Users/me/desktop/fixture/.")):
+            db.execute("INSERT INTO sessions (id, workspace, task, mode, permission_mode, started_at) "
+                       "VALUES (?, ?, 't', 'agent', 'workspace-write', 'then')", (session_id, workspace))
+        migrate(db)
+        keys = {row[0] for row in db.execute("SELECT workspace_key FROM sessions")}
+        self.assertEqual(len(keys), 1 if sys.platform == "win32" else 2)
 
     def test_a_newer_database_is_refused(self):
         db = fresh()

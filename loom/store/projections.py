@@ -2,16 +2,17 @@ import json
 import sqlite3
 
 from orchestration.tasks import TRANSITIONS
+from paths import workspace_key
 
 FINAL_STATUSES = frozenset(status.value for status, after in TRANSITIONS.items() if not after)
 
 
 def _session_started(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
     db.execute(
-        "INSERT INTO sessions (id, parent_id, workspace, task, mode, permission_mode, model_key, started_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (session_id, payload.get("parent_id"), payload["workspace"], payload["task"], payload["mode"],
-         payload["permission_mode"], payload.get("model_key"), ts),
+        "INSERT INTO sessions (id, parent_id, workspace, workspace_key, task, mode, permission_mode, model_key, "
+        "started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (session_id, payload.get("parent_id"), payload["workspace"], workspace_key(payload["workspace"]),
+         payload["task"], payload["mode"], payload["permission_mode"], payload.get("model_key"), ts),
     )
 
 
