@@ -21,11 +21,16 @@ const (
 	Error                = "error"
 	ModelError           = "model_error"
 	ModelCalled          = "model_called"
+	AwaitingInput        = "awaiting_input"
 
 	Attached           = "attached"
 	Models             = "models"
 	HumanMessageQueued = "human_message_queued"
 	EndSessionQueued   = "end_session_queued"
+	SessionStatus      = "session_status"
+	Projects           = "projects"
+	Sessions           = "sessions"
+	KillSessionDone    = "kill_session_done"
 )
 
 type Event struct {
