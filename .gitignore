@@ -6,6 +6,9 @@ fox.db
 fox.db-wal
 fox.db-shm
 
+# One stderr log per worker process, written by the hub.
+logs/
+
 # The build plan is kept local only — not published to the remote.
 PLAN.md
 
