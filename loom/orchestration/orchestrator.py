@@ -271,6 +271,7 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
                     if injection_queue is None:
                         break
                     history.add(Turn(role="assistant", text=response.text or "(no reply)", raw=response.raw))
+                    emit(event_sink, "awaiting_input", {"task_id": None})
                     messages = injection_queue.wait_for_message(None)
                     if messages is None:
                         break

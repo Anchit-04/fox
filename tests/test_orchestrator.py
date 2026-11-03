@@ -495,6 +495,8 @@ class OrchestratorTests(unittest.TestCase):
         texts = [t.text for t in model.requests[1]["history"]]
         self.assertEqual(texts[-2:], ["Here is the project.", "[Message from human]: now list the tests"])
         self.assertEqual(model.requests[1]["history"][-2].role, "assistant")
+        order = [e for e, _ in self.events if e in ("awaiting_input", "human_message_injected")]
+        self.assertEqual(order, ["awaiting_input", "human_message_injected", "awaiting_input"])
 
     def test_without_a_queue_a_finished_answer_still_ends_the_run(self):
         model = ScriptedModel(done("Only answer."))

@@ -1,10 +1,11 @@
 import hashlib
 import json
+import os
 import time
 
 from events import emit
 from providers import ProviderResponse, Turn
-from providers.config import call_cost, get_provider
+from providers.config import MODEL_REGISTRY, call_cost, get_provider
 
 PAUSE_KINDS = {401: "key", 403: "key", 402: "credits", 404: "model", 429: "rate_limit"}
 
@@ -55,9 +56,18 @@ def model_error_kind(error: Exception) -> str | None:
     return PAUSE_KINDS.get(status)
 
 
+def current_provider(provider, model_key: str):
+    env_key = MODEL_REGISTRY.get(model_key, {}).get("env_key")
+    fresh = os.environ.get(env_key) if env_key else None
+    if fresh and getattr(provider, "api_key", fresh) != fresh:
+        return get_provider(model_key)
+    return provider
+
+
 def generate_or_pause(provider, history, tools: list[dict], system_prompt: str, *, model_key: str,
                       task_id: str | None, event_sink, injection_queue):
     while True:
+        provider = current_provider(provider, model_key)
         try:
             return provider, timed_generate(provider, history.turns, tools, system_prompt, model_key=model_key,
                                             task_id=task_id, event_sink=event_sink)

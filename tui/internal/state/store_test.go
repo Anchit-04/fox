@@ -49,6 +49,15 @@ func ids(sessions []*Session) []string {
 	return out
 }
 
+func TestStatusOfAnotherSessionAddsNothing(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_status","session_id":"elsewhere","workspace":"C:/api","status":"running"}`)
+	feed(t, s, `{"type":"projects","current":"C:/shop","projects":[]}`)
+	if len(s.Order) != 0 || len(s.Sessions) != 0 {
+		t.Fatalf("got sessions %v", s.Order)
+	}
+}
+
 func TestStartedTakesPendingStart(t *testing.T) {
 	s := New()
 	s.ExpectStart(PendingStart{Task: "fix the login bug", Mode: "build"})

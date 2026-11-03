@@ -2,30 +2,36 @@
 Model registry — the one file you touch to add a model. Everything upstream
 refers to models only by the short key below, never SDK type or raw model id.
 
-To add one: pick a key, point it at a Provider class + real model id, name
-the env var holding its key (actual key goes in .env, never here). Not
+To add one: pick a key, point it at a provider module (a key of
+PROVIDER_CLASSES) + real model id, name the env var holding its key
+(actual key goes in .env, never here). Not
 Gemini/Anthropic? It's almost certainly OpenAI-compatible. "tier" is pure
 routing metadata, not a constructor arg — must be popped in get_provider()
 below or every call breaks with an unexpected-kwarg TypeError.
 """
 
-from .anthropic import AnthropicProvider
+from importlib import import_module
+
 from .base import Usage
-from .gemini import GeminiProvider
-from .openai_compatible import OpenAICompatibleProvider
+
+PROVIDER_CLASSES = {
+    "anthropic": "AnthropicProvider",
+    "gemini": "GeminiProvider",
+    "openai_compatible": "OpenAICompatibleProvider",
+}
 
 FREE = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
 
 MODEL_REGISTRY = {
     "claude-opus": {
-        "provider": AnthropicProvider,
+        "provider": "anthropic",
         "model_id": "claude-opus-5-5",
         "price": {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
         "env_key": "ANTHROPIC_API_KEY",
         "tier": "strong",
     },
     "claude-haiku": {
-        "provider": AnthropicProvider,
+        "provider": "anthropic",
         "model_id": "claude-haiku-5-5",
         "price": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125,
                   "long_context": {"over": 100_000, "input": 0.50, "output": 2.50, "cache_read": 0.05,
@@ -34,21 +40,21 @@ MODEL_REGISTRY = {
         "tier": "cheap",
     },
     "gemini-lite": {
-        "provider": GeminiProvider,
+        "provider": "gemini",
         "model_id": "gemini-3.1-flash-lite",
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
         "tier": "cheap",
     },
     "gemini-flash": {
-        "provider": GeminiProvider,
+        "provider": "gemini",
         "model_id": "gemini-3.8-flash",  # was 3.6-flash — that id started returning 503 "high demand"; 3.8 is current-gen and on the same key
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
         "tier": "cheap",
     },
     "deepseek-chat": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "deepseek-chat",
         "price": None,
         "env_key": "DEEPSEEK_API_KEY",
@@ -56,7 +62,7 @@ MODEL_REGISTRY = {
         "tier": "cheap",
     },
     "kimi-k2": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "kimi-k2-0711-preview",
         "price": None,
         "env_key": "MOONSHOT_API_KEY",
@@ -72,7 +78,7 @@ MODEL_REGISTRY = {
     # merely *accept* a tools array often won't actually emit tool calls —
     # both entries below were confirmed to emit a real one, not just chat.
     "north-code": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "cohere/north-mini-code:free",
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
@@ -82,7 +88,7 @@ MODEL_REGISTRY = {
     # Fastest verified free model — ~1.7s to first tool call, which is what
     # makes a live agent loop feel responsive rather than hung.
     "dots-note": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "dots-studio/dots-3-note-preview:free",
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
@@ -92,7 +98,7 @@ MODEL_REGISTRY = {
     # 1M context — the one to reach for when a task reads a lot of files.
     # ~6.5s/call. Its 550b sibling is nemotron-ultra below: it tool-calls but was ~39s/call when measured.
     "nemotron-lightning": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "nvidia/nemotron-3.5-lightning:free",
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
@@ -100,7 +106,7 @@ MODEL_REGISTRY = {
         "tier": "cheap",
     },
     "nemotron-ultra": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
@@ -108,7 +114,7 @@ MODEL_REGISTRY = {
         "tier": "strong",
     },
     "nemotron-super": {
-        "provider": OpenAICompatibleProvider,
+        "provider": "openai_compatible",
         "model_id": "nvidia/nemotron-3.5-super-vl:free",
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
@@ -118,13 +124,17 @@ MODEL_REGISTRY = {
 }
 
 
+def provider_class(module: str) -> type:
+    return getattr(import_module(f"{__package__}.{module}"), PROVIDER_CLASSES[module])
+
+
 def get_provider(key: str):
     """Instantiate the Provider for a registry key. Raises if the key is
     unknown, or if that provider's API key env var isn't set."""
     if key not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model key {key!r}. Known: {sorted(MODEL_REGISTRY)}")
     cfg = dict(MODEL_REGISTRY[key])
-    provider_cls = cfg.pop("provider")
+    provider_cls = provider_class(cfg.pop("provider"))
     model_id = cfg.pop("model_id")
     cfg.pop("tier", None)  # routing/vault metadata, not a Provider constructor arg
     cfg.pop("price", None)

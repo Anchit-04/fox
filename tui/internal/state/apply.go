@@ -16,6 +16,8 @@ func (s *Store) Apply(ev protocol.Event) {
 	case protocol.Attached:
 		s.applyAttached(ev)
 		return
+	case protocol.SessionStatus, protocol.Projects, protocol.Sessions:
+		return
 	}
 
 	if ev.SessionID == "" {

@@ -24,11 +24,24 @@ class VaultEntry:
 _validated_cache: dict[str, bool] = {}
 
 
+def _lookup(env_var: str) -> str | None:
+    return dotenv.dotenv_values(FOX_HOME / ".env").get(env_var) or os.environ.get(env_var)
+
+
+def reload() -> None:
+    dotenv.load_dotenv(FOX_HOME / ".env", override=True)
+    _validated_cache.clear()
+
+
+def remember(validated: dict[str, bool]) -> None:
+    _validated_cache.update({key: value for key, value in validated.items() if key in MODEL_REGISTRY})
+
+
 def get_key(model_key: str) -> str:
     if model_key not in MODEL_REGISTRY:
         raise VaultError(f"Unknown model key {model_key!r}. Known: {sorted(MODEL_REGISTRY)}")
     env_var = MODEL_REGISTRY[model_key]["env_key"]
-    value = os.environ.get(env_var)
+    value = _lookup(env_var)
     if not value:
         raise VaultError(f"No API key set for {model_key!r} — set {env_var} in .env.")
     return value
@@ -51,7 +64,7 @@ def is_present(model_key: str) -> bool:
     if model_key not in MODEL_REGISTRY:
         raise VaultError(f"Unknown model key {model_key!r}. Known: {sorted(MODEL_REGISTRY)}")
     env_var = MODEL_REGISTRY[model_key]["env_key"]
-    return bool(os.environ.get(env_var))
+    return bool(_lookup(env_var))
 
 
 def validate_key(model_key: str, force: bool = False) -> bool:
