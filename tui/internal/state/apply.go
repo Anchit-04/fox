@@ -16,7 +16,17 @@ func (s *Store) Apply(ev protocol.Event) {
 	case protocol.Attached:
 		s.applyAttached(ev)
 		return
-	case protocol.SessionStatus, protocol.Projects, protocol.Sessions:
+	case protocol.SessionStatus:
+		if p, err := protocol.Payload[protocol.SessionSummary](ev); err == nil && p.SessionID != "" {
+			s.summarize(p)
+		}
+		return
+	case protocol.Sessions:
+		if p, err := protocol.Payload[protocol.SessionsPayload](ev); err == nil {
+			s.applySessions(p.Sessions)
+		}
+		return
+	case protocol.Projects:
 		return
 	}
 
@@ -30,6 +40,7 @@ func (s *Store) Apply(ev protocol.Event) {
 	}
 
 	sess := s.ensure(ev.SessionID)
+	sess.Loaded = true
 	if ev.Seq > 0 {
 		if ev.Seq <= sess.lastSeq {
 			return
@@ -129,6 +140,7 @@ func (s *Store) applyAttached(ev protocol.Event) {
 	}
 	view := p.State
 	sess := s.ensure(ev.SessionID)
+	sess.Loaded = true
 	sess.Task, sess.Workspace, sess.Mode, sess.PermissionMode = sideQuestion(view.Task), view.Workspace, view.Mode, view.PermissionMode
 	sess.Todos = view.Todos
 	if view.ModelKey != nil {
@@ -147,6 +159,56 @@ func (s *Store) applyAttached(ev protocol.Event) {
 		sess.Status = Failed
 	}
 	sess.Unread = false
+}
+
+func (s *Store) applySessions(rows []protocol.SessionSummary) {
+	order := make([]string, 0, len(rows)+len(s.Order))
+	listed := map[string]bool{}
+	for i := len(rows) - 1; i >= 0; i-- {
+		id := rows[i].SessionID
+		if id == "" || listed[id] {
+			continue
+		}
+		s.summarize(rows[i])
+		listed[id] = true
+		order = append(order, id)
+	}
+	for _, id := range s.Order {
+		if !listed[id] {
+			order = append(order, id)
+		}
+	}
+	s.Order = order
+}
+
+func (s *Store) summarize(p protocol.SessionSummary) {
+	sess := s.ensure(p.SessionID)
+	if sess.Loaded {
+		return
+	}
+	sess.Task, sess.Workspace, sess.Mode, sess.PermissionMode = sideQuestion(p.Task), p.Workspace, p.Mode, p.PermissionMode
+	if p.ParentID != nil {
+		sess.ParentID = *p.ParentID
+	}
+	if p.ModelKey != nil {
+		sess.Model = *p.ModelKey
+	}
+	sess.Status = serverStatus(p.Status)
+}
+
+func serverStatus(status string) Status {
+	switch status {
+	case "running":
+		return Working
+	case "idle":
+		return Idle
+	case "needs_approval":
+		return NeedsYou
+	case "failed":
+		return Failed
+	default:
+		return Done
+	}
 }
 
 func (s *Store) applySessionStarted(sess *Session, ev protocol.Event) {

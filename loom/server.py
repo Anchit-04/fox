@@ -322,7 +322,8 @@ class Hub:
         info = self.sessions[session_id]
         websockets.broadcast(self.clients, json.dumps({
             "type": "session_status", "session_id": session_id, "parent_id": info.parent_id,
-            "workspace": info.workspace, "status": info.status, "model_key": info.model_key, "mode": info.mode}))
+            "workspace": info.workspace, "task": info.task, "status": info.status, "model_key": info.model_key,
+            "mode": info.mode, "permission_mode": info.permission_mode}))
 
     async def _forward(self, ws, msg: dict, command: dict) -> bool:
         session_id = msg.get("session_id")
@@ -404,6 +405,9 @@ class Hub:
         rows = self.store.sessions(msg.get("project"), msg.get("limit"))
         for row in rows:
             row["live"] = self._live_worker(row["session_id"]) is not None
+            info = self.sessions.get(row["session_id"])
+            if row["live"] and info is not None:
+                row["status"] = info.status
         await _reply(ws, {"type": "sessions", "sessions": rows})
 
     async def shutdown(self) -> None:

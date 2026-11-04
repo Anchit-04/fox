@@ -107,7 +107,7 @@ func cacheKey(sess *state.Session, width int) string {
 	for _, id := range sess.TaskOrder {
 		tasks.WriteString(sess.Tasks[id].Status)
 	}
-	return fmt.Sprintf("%s%d|%d|%d|%s|%d", sessionPrefix(sess), width, len(sess.Entries), pending, tasks.String(), sess.Status)
+	return fmt.Sprintf("%s%d|%d|%d|%s|%d|%t", sessionPrefix(sess), width, len(sess.Entries), pending, tasks.String(), sess.Status, sess.Loaded)
 }
 
 func (m Model) render(sess *state.Session, task string) []block {
@@ -118,6 +118,9 @@ func (m Model) render(sess *state.Session, task string) []block {
 	}
 	if task != "" {
 		return m.renderTask(sess, task, width)
+	}
+	if !sess.Loaded {
+		return []block{{text: th.Faint.Render("loading this session…")}}
 	}
 	blocks := m.blocks(sess, "", width)
 	if len(blocks) == 0 {

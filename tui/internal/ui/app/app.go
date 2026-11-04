@@ -103,6 +103,7 @@ type Model struct {
 	ticking     bool
 	confirmEnd  string
 	sidebarW    int
+	attaching   map[string]bool
 
 	sidebar    sidebar.Model
 	transcript transcript.Model
@@ -123,6 +124,7 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 		nextModel:  opts.Model,
 		sidebarW:   opts.SidebarWidth,
 		working:    map[string]time.Time{},
+		attaching:  map[string]bool{},
 		connected:  true,
 		sidebar:    sidebar.New(th),
 		transcript: transcript.New(th),
@@ -138,7 +140,7 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.send.SendCmd(protocol.ListModels{})}
+	cmds := []tea.Cmd{m.send.SendCmd(protocol.ListModels{}), m.send.SendCmd(protocol.ListSessions{})}
 	for _, id := range m.opts.Attach {
 		cmds = append(cmds, m.send.SendCmd(protocol.AttachSession{SessionID: id}))
 	}
@@ -173,7 +175,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.flash = "couldn't send " + msg.Kind + ": " + msg.Err.Error()
 		m.vault.SetBusy(false, "")
 	case sidebar.SelectMsg:
-		m.selectSession(msg.SessionID, msg.TaskID)
+		return m.selectSession(msg.SessionID, msg.TaskID)
 	case sidebar.NewSessionMsg:
 		m.active = ""
 		return m.setFocus(focusComposer)
@@ -246,6 +248,7 @@ func (m *Model) onEvent(ev protocol.Event) {
 			m.selectSession(ev.SessionID, "")
 		}
 	case protocol.Attached:
+		delete(m.attaching, ev.SessionID)
 		if ev.SessionID == m.attachFocus {
 			m.attachFocus = ""
 			m.selectSession(ev.SessionID, "")
@@ -292,11 +295,17 @@ func (m *Model) sync() {
 	m.transcript.Sync(m.store.Session(m.active), m.activeTask)
 }
 
-func (m *Model) selectSession(id, task string) {
+func (m *Model) selectSession(id, task string) tea.Cmd {
 	m.active, m.activeTask = id, task
 	m.draft = nil
 	m.picking = false
-	m.setFocus(focusComposer)
+	focus := m.setFocus(focusComposer)
+	sess := m.store.Session(id)
+	if sess == nil || sess.Loaded || m.attaching[id] {
+		return focus
+	}
+	m.attaching[id] = true
+	return tea.Batch(focus, m.send.SendCmd(protocol.AttachSession{SessionID: id}))
 }
 
 func (m *Model) setFocus(f focus) tea.Cmd {
@@ -331,6 +340,11 @@ func (m *Model) submit(text string) tea.Cmd {
 		})
 	}
 	sess := m.store.Session(m.active)
+	if sess != nil && !sess.Loaded {
+		m.composer.SetValue(text)
+		m.flash = "still loading this session · try again in a moment"
+		return nil
+	}
 	if sess == nil || sess.Status == state.Done || sess.Status == state.Failed {
 		m.composer.SetValue(text)
 		m.flash = "this session has ended · ctrl+n starts a new one"

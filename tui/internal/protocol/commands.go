@@ -41,6 +41,8 @@ type ListModels struct {
 	Validate bool `json:"validate"`
 }
 
+type ListSessions struct{}
+
 type SetModelKey struct {
 	ModelKey string `json:"model_key"`
 	Value    string `json:"value"`
@@ -53,6 +55,7 @@ func (EndSession) Kind() string       { return "end_session" }
 func (ApprovalResponse) Kind() string { return "approval_response" }
 func (ListModels) Kind() string       { return "list_models" }
 func (SetModelKey) Kind() string      { return "set_model_key" }
+func (ListSessions) Kind() string     { return "list_sessions" }
 
 func Encode(c Command) ([]byte, error) {
 	body, err := json.Marshal(c)

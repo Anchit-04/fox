@@ -144,3 +144,18 @@ type VaultEntry struct {
 type ModelsPayload struct {
 	Models []VaultEntry `json:"models"`
 }
+
+type SessionSummary struct {
+	SessionID      string  `json:"session_id"`
+	ParentID       *string `json:"parent_id"`
+	Workspace      string  `json:"workspace"`
+	Task           string  `json:"task"`
+	Mode           string  `json:"mode"`
+	PermissionMode string  `json:"permission_mode"`
+	ModelKey       *string `json:"model_key"`
+	Status         string  `json:"status"`
+}
+
+type SessionsPayload struct {
+	Sessions []SessionSummary `json:"sessions"`
+}

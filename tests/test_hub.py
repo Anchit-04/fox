@@ -104,6 +104,7 @@ class StartingAndRouting(HubCase):
         await tui.event(session_id, "awaiting_input")
         idle = await other.until(lambda m: m.get("type") == "session_status" and m["status"] == "idle")
         self.assertEqual((idle["session_id"], idle["workspace"]), (session_id, str(self.project_a.resolve())))
+        self.assertTrue(idle["task"])
         self.assertFalse([m for m in other.seen if m.get("type") == "agent_turn"])
 
     async def test_two_workers_and_messages_reach_the_right_one(self):
@@ -250,6 +251,7 @@ class Listing(HubCase):
         sessions = (await tui.until(lambda m: m.get("type") == "sessions"))["sessions"]
         live_flags = {s["session_id"]: s["live"] for s in sessions}
         self.assertTrue(live_flags[live])
+        self.assertEqual({s["session_id"]: s["status"] for s in sessions}[live], "idle")
         if sys.platform == "win32":
             self.assertFalse(live_flags["older"])
 

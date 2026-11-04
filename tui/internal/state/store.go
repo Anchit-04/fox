@@ -2,6 +2,7 @@ package state
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"fox/tui/internal/protocol"
@@ -73,6 +74,7 @@ type Session struct {
 	InputTokens    int
 	OutputTokens   int
 	Unread         bool
+	Loaded         bool
 	lastSeq        int
 }
 
@@ -142,7 +144,8 @@ func (s *Store) Projects() []Project {
 		if sess.ParentID != "" {
 			continue
 		}
-		i, ok := index[sess.Workspace]
+		key := workspaceKey(sess.Workspace)
+		i, ok := index[key]
 		if !ok {
 			name := filepath.Base(sess.Workspace)
 			if sess.Workspace == "" {
@@ -150,11 +153,22 @@ func (s *Store) Projects() []Project {
 			}
 			projects = append(projects, Project{Path: sess.Workspace, Name: name})
 			i = len(projects) - 1
-			index[sess.Workspace] = i
+			index[key] = i
 		}
 		projects[i].Sessions = append(projects[i].Sessions, sess)
 	}
 	return projects
+}
+
+func workspaceKey(path string) string {
+	if path == "" {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	return path
 }
 
 func (s *Store) Children(parentID string) []*Session {

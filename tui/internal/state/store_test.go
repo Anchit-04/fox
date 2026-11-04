@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -49,12 +50,82 @@ func ids(sessions []*Session) []string {
 	return out
 }
 
-func TestStatusOfAnotherSessionAddsNothing(t *testing.T) {
+func TestStatusOfAnotherSessionAddsAStub(t *testing.T) {
 	s := New()
-	feed(t, s, `{"type":"session_status","session_id":"elsewhere","workspace":"C:/api","status":"running"}`)
+	feed(t, s, `{"type":"session_status","session_id":"elsewhere","workspace":"C:/api","task":"fix login","status":"running","mode":"agent"}`)
 	feed(t, s, `{"type":"projects","current":"C:/shop","projects":[]}`)
-	if len(s.Order) != 0 || len(s.Sessions) != 0 {
+	sess := s.Session("elsewhere")
+	if sess == nil || len(s.Order) != 1 {
 		t.Fatalf("got sessions %v", s.Order)
+	}
+	if sess.Loaded || len(sess.Entries) != 0 || sess.Status != Working || sess.Task != "fix login" || sess.Workspace != "C:/api" {
+		t.Fatalf("stub = %+v", sess)
+	}
+	feed(t, s, `{"type":"session_status","session_id":"elsewhere","workspace":"C:/api","task":"fix login","status":"idle"}`)
+	if sess.Status != Idle {
+		t.Fatalf("status = %v", sess.Status)
+	}
+}
+
+func TestStatusLeavesALoadedSessionAlone(t *testing.T) {
+	s := New()
+	start(t, s, "s1", "/w/fox")
+	feed(t, s, `{"type":"session_status","session_id":"s1","workspace":"/w/other","task":"other","status":"done"}`)
+	sess := s.Session("s1")
+	if !sess.Loaded || sess.Status != Working || sess.Task != "task s1" || sess.Workspace != "/w/fox" {
+		t.Fatalf("session = %+v", sess)
+	}
+}
+
+func TestAttachedFillsAStub(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_status","session_id":"s1","workspace":"/w/fox","task":"hi","status":"idle"}`)
+	attach(t, s, "s1", protocol.SessionView{
+		Task: "hi", Workspace: "/w/fox", Mode: "agent", Status: "running",
+		Turns: []protocol.Stored{
+			turn(1, protocol.SessionStarted, "", `{"task":"hi","workspace":"/w/fox","mode":"agent"}`),
+			turn(2, protocol.AgentTurn, "", `{"model_key":"m","text":"hello"}`),
+		},
+	})
+	sess := s.Session("s1")
+	if !sess.Loaded || len(sess.Entries) != 2 || len(s.Order) != 1 {
+		t.Fatalf("session = %+v, order %v", sess, s.Order)
+	}
+}
+
+func TestListingAddsStubsOldestFirst(t *testing.T) {
+	s := New()
+	start(t, s, "mine", "/w/fox")
+	feed(t, s, `{"type":"sessions","sessions":[
+		{"session_id":"mine","workspace":"/w/fox","task":"renamed","status":"done"},
+		{"session_id":"side","parent_id":"old","workspace":"/w/fox","task":"[Side conversation. ctx]\nQuestion: why?","status":"done"},
+		{"session_id":"old","workspace":"/w/shop","task":"older","status":"failed"}]}`)
+	if !slices.Equal(s.Order, []string{"old", "side", "mine"}) {
+		t.Fatalf("order = %v", s.Order)
+	}
+	if mine := s.Session("mine"); mine.Task != "task mine" || len(mine.Entries) != 1 {
+		t.Fatalf("loaded session changed: %+v", mine)
+	}
+	if old := s.Session("old"); old.Loaded || old.Status != Failed {
+		t.Fatalf("old = %+v", old)
+	}
+	if side := s.Session("side"); side.ParentID != "old" || side.Task != "why?" {
+		t.Fatalf("side = %+v", side)
+	}
+	if got := ids(s.Children("old")); !slices.Equal(got, []string{"side"}) {
+		t.Fatalf("children = %v", got)
+	}
+}
+
+func TestProjectsMergeSpellingsOfOneFolder(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("paths are case-sensitive here")
+	}
+	s := New()
+	start(t, s, "s1", `C:\Users\me\Desktop\Fox`)
+	start(t, s, "s2", `c:\users\me\desktop\fox\`)
+	if projects := s.Projects(); len(projects) != 1 || len(projects[0].Sessions) != 2 {
+		t.Fatalf("projects = %+v", projects)
 	}
 }
 
