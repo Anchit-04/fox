@@ -17,6 +17,7 @@ from orchestration.dispatch import Finished, TaskInbox, start_task
 from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
 from orchestration.tasks import Lane, Task, TaskRegistry
 from providers import ToolResult, Turn, get_provider
+from sandbox.sandbox_client import SHELL_NOTE
 from tools import file_tools
 from tools.todo_tool import TodoManager
 
@@ -47,7 +48,8 @@ How to plan:
 - Each task's full result is in shared memory under its id. Use memory_read with the id, for example "t3", when the one-line summary is not enough.
 - Use todo_write to keep your plan.
 - When the whole job is done, reply in plain text with no tool calls. That reply is your final answer to the user.
-"""
+
+""" + SHELL_NOTE
 
 
 def delegate_tool(session_mode: str) -> dict:

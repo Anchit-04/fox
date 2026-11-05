@@ -20,10 +20,20 @@ from pathlib import Path
 import paths
 
 MAX_OUTPUT_CHARS = 8000  # context-budget cap, not a sandboxing concern — sandboxd itself doesn't truncate
+COMMAND_TIMEOUT_SECONDS = 30
+
+SHELL_NOTE = f"""Shell:
+- run_bash_command runs each command in Windows cmd.exe (as `cmd /C <command>`). It is not bash and not PowerShell.
+- Use cmd syntax: `dir`, `type file.txt`, `cd`, `where`, `set`, `findstr`, `%USERPROFILE%`, `&&` to chain commands.
+- Don't use `ls`, `pwd`, `cat`, `grep`, `rm`, `touch` or `$HOME`: cmd doesn't have them. Use list_directory and search_files for files and code.
+- For PowerShell, run `powershell -NoProfile -Command "..."`.
+- Every command starts in the workspace folder. A `cd` does not carry over to the next command.
+- A command is stopped after {COMMAND_TIMEOUT_SECONDS} seconds, and output past {MAX_OUTPUT_CHARS} characters is cut.
+"""
 
 # Comfortably above sandboxd's own 30s per-command timeout (main.go's
 # DefaultTimeout) — this should only fire if sandboxd itself is hung.
-CLIENT_READ_TIMEOUT = 45
+CLIENT_READ_TIMEOUT = COMMAND_TIMEOUT_SECONDS + 15
 
 _SANDBOXD_PATH = Path(__file__).parent / "sandboxd" / "sandboxd.exe"
 

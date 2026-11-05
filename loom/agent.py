@@ -21,7 +21,7 @@ from approval import CLIApprover, DenyApprover
 import context
 from context import MAX_ITERATIONS, build_compact_input
 from providers import get_provider, Turn, ToolResult
-from sandbox.sandbox_client import run_bash_command
+from sandbox.sandbox_client import SHELL_NOTE, run_bash_command
 import memory
 from events import EventSink, emit
 from history import History
@@ -58,9 +58,9 @@ SYSTEM_PROMPT_BASE = """You have access to:
 - list_directory — list files/folders under a path. Use this instead of bash
   ls/dir/find, which behave differently across OSes.
 - run_bash_command — for anything else (running tests, git, installing packages).
-  You may be on Windows (cmd/PowerShell), where Unix tools like ls and find
-  aren't available by default — prefer list_directory and search_files instead.
+  It runs Windows cmd.exe; see Shell below.
 
+""" + SHELL_NOTE + """
 Rules:
 - For non-trivial tasks, call todo_write first with your plan before doing
   anything else.
@@ -87,16 +87,17 @@ BASH_TOOL = {
     "type": "function",
     "name": "run_bash_command",
     "description": (
-        "Execute a bash command in the project working directory and "
-        "return its stdout, stderr, and exit code. Use this to read "
-        "files, write files, search code, and run tests."
+        "Run one command in Windows cmd.exe, starting in the project "
+        "folder, and return its exit code and output. Use cmd syntax "
+        "(dir, type, findstr), not bash. Use it to run tests, git and "
+        "build tools."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "command": {
                 "type": "string",
-                "description": "The bash command to execute.",
+                "description": "The cmd.exe command to run.",
             }
         },
         "required": ["command"],
