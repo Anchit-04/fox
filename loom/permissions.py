@@ -73,6 +73,12 @@ PATH_TOOLS = {
 
 WRITE_TOOLS = frozenset(name for name, (_, modifies) in PATH_TOOLS.items() if modifies)
 
+BROWSER_TOOLS = frozenset({
+    "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_select", "browser_check",
+    "browser_hover", "browser_press", "browser_scroll", "browser_back", "browser_upload", "browser_dialog",
+    "browser_layout_check", "browser_screenshot", "browser_look", "browser_ask_human",
+})
+
 # --- Bash heuristics ---------------------------------------------------------
 
 # Commands that only read, and whose name can't be a path into somewhere else.
@@ -93,6 +99,7 @@ SAFE_SUBCOMMANDS = {
     "npm": {"list", "ls", "--version"},
     "go": {"version", "vet", "list"},
     "python": {"--version"}, "python3": {"--version"}, "py": {"--version"},
+    "node": {"--version", "-v"},
 }
 
 # Shell syntax that chains, redirects, or substitutes — any of these can hide a
@@ -166,6 +173,15 @@ def classify(tool_name: str, args: dict, mode: str = WORKSPACE_WRITE,
         return Decision(ALLOW, "full-access mode")
     if tool_name in INTERNAL_TOOLS:
         return Decision(ALLOW, "session-internal, touches no files")
+
+    if tool_name == "browser_upload":
+        files = args.get("files")
+        names = ", ".join(files) if isinstance(files, list) else str(files or "")
+        if mode == READ_ONLY:
+            return Decision(DENY, "uploading sends project files to a website; session is read-only")
+        return Decision(ASK, f"uploads project files to a website: {names}")
+    if tool_name in BROWSER_TOOLS:
+        return Decision(ALLOW, "browsing")
 
     if tool_name in PATH_TOOLS:
         arg_name, modifies = PATH_TOOLS[tool_name]

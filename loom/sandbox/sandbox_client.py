@@ -28,6 +28,8 @@ SHELL_NOTE = f"""Shell:
 - Don't use `ls`, `pwd`, `cat`, `grep`, `rm`, `touch` or `$HOME`: cmd doesn't have them. Use list_directory and search_files for files and code.
 - For PowerShell, run `powershell -NoProfile -Command "..."`.
 - Every command starts in the workspace folder. A `cd` does not carry over to the next command.
+- Everything a command starts is closed when the command ends: `start`, `explorer`, browsers, and servers left
+  running in the background. Exit code 0 from `start` does not mean anything opened. Use browser_open for web pages.
 - A command is stopped after {COMMAND_TIMEOUT_SECONDS} seconds, and output past {MAX_OUTPUT_CHARS} characters is cut.
 """
 
