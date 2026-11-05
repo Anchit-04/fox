@@ -11,8 +11,31 @@ from . import projections
 from .migrations import MIGRATIONS, StoreError, migrate as run_migrations, version
 
 
+PROJECT_SPACE = "project:"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def project_space(workspace: str | Path) -> str:
+    return PROJECT_SPACE + workspace_key(workspace)
+
+
+def is_project_space(space_id: str | None) -> bool:
+    return bool(space_id) and space_id.startswith(PROJECT_SPACE)
+
+
+def _append(db: sqlite3.Connection, session_id: str, event_type: str, payload: dict) -> int:
+    seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?",
+                     (session_id,)).fetchone()[0]
+    ts = _now()
+    db.execute(
+        "INSERT INTO events (session_id, seq, ts, task_id, type, payload) VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, seq, ts, payload.get("task_id"), event_type, json.dumps(payload, default=str)),
+    )
+    projections.apply(db, session_id, seq, ts, event_type, payload)
+    return seq
 
 
 class Store:
@@ -62,15 +85,15 @@ class Store:
 
     def append_event(self, session_id: str, event_type: str, payload: dict) -> int:
         with self._write() as db:
-            seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?",
-                             (session_id,)).fetchone()[0]
-            ts = _now()
-            db.execute(
-                "INSERT INTO events (session_id, seq, ts, task_id, type, payload) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, seq, ts, payload.get("task_id"), event_type, json.dumps(payload, default=str)),
-            )
-            projections.apply(db, session_id, seq, ts, event_type, payload)
-        return seq
+            return _append(db, session_id, event_type, payload)
+
+    def append_note(self, session_id: str, space_id: str, prefix: str, payload: dict) -> tuple[int, str]:
+        with self._write() as db:
+            count = db.execute("SELECT COUNT(*) FROM memory_entries WHERE space_id = ? AND kind = 'note'",
+                               (space_id,)).fetchone()[0]
+            entry_id = f"{prefix}note_{count + 1}"
+            payload = {**payload, "entry_id": entry_id, "space_id": space_id, "kind": "note"}
+            return _append(db, session_id, "memory_written", payload), entry_id
 
     def rebuild(self, session_id: str) -> None:
         with self._write() as db:
@@ -111,14 +134,26 @@ class Store:
             return None
         return {**session, "session_id": session_id, "turns": self.events(session_id)}
 
-    def memory_entries(self, session_id: str) -> list[dict]:
-        return self._query("SELECT * FROM memory_entries WHERE session_id = ? ORDER BY created_at, entry_id",
-                           (session_id,))
+    def memory_entries(self, spaces: str | list[str]) -> list[dict]:
+        spaces = [spaces] if isinstance(spaces, str) else list(spaces)
+        return self._query(f"SELECT * FROM memory_entries WHERE space_id IN ({', '.join('?' * len(spaces))}) "
+                           "ORDER BY position, space_id", tuple(spaces))
 
-    def memory_entry(self, session_id: str, entry_id: str) -> dict | None:
-        rows = self._query("SELECT * FROM memory_entries WHERE session_id = ? AND entry_id = ?",
-                           (session_id, entry_id))
+    def memory_entry(self, spaces: str | list[str], entry_id: str) -> dict | None:
+        spaces = [spaces] if isinstance(spaces, str) else list(spaces)
+        rows = self._query(f"SELECT * FROM memory_entries WHERE space_id IN ({', '.join('?' * len(spaces))}) "
+                           "AND entry_id = ?", (*spaces, entry_id))
         return rows[0] if rows else None
+
+    def space_tag(self, session_id: str, space_id: str, shortest: int = 4) -> str:
+        others = [row["id"] for row in self._query(
+            "SELECT id FROM sessions WHERE memory_space = ? AND parent_id IS NULL AND id != ?",
+            (space_id, session_id))]
+        for length in range(shortest, len(session_id)):
+            tag = session_id[:length]
+            if not any(other.startswith(tag) for other in others):
+                return tag
+        return session_id
 
     def model_calls(self, session_id: str) -> list[dict]:
         rows = self._query("SELECT * FROM model_calls WHERE session_id = ? ORDER BY seq", (session_id,))
@@ -138,18 +173,14 @@ class Store:
 
     def sessions(self, project: str | None = None, limit: int | None = None) -> list[dict]:
         sql = ("SELECT id AS session_id, parent_id, workspace, task, mode, permission_mode, model_key, status, "
-               "started_at, ended_at FROM sessions")
+               "memory_space, started_at, ended_at FROM sessions")
         params: list = []
         if project is not None:
             sql += " WHERE workspace_key = ?"
             params.append(workspace_key(project))
         params.append(-1 if limit is None else limit)
-        return self._query(sql + " ORDER BY started_at DESC LIMIT ?", tuple(params))
-
-    def next_note_id(self, session_id: str) -> str:
-        count = self._query("SELECT COUNT(*) AS n FROM memory_entries WHERE session_id = ? AND kind = 'note'",
-                            (session_id,))[0]["n"]
-        return f"note_{count + 1}"
+        rows = self._query(sql + " ORDER BY started_at DESC LIMIT ?", tuple(params))
+        return [{**row, "shared_memory": is_project_space(row["memory_space"])} for row in rows]
 
     def close(self) -> None:
         with self._lock:

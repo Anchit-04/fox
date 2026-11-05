@@ -49,6 +49,13 @@ type sideDraft struct {
 	quote  string
 }
 
+type newChat struct {
+	workspace string
+	name      string
+	shared    bool
+	chosen    bool
+}
+
 const quoteLines = 8
 
 type tickMsg struct{}
@@ -104,6 +111,9 @@ type Model struct {
 	confirmEnd  string
 	sidebarW    int
 	attaching   map[string]bool
+	chat        newChat
+	askPath     bool
+	lastStart   string
 
 	sidebar    sidebar.Model
 	transcript transcript.Model
@@ -140,7 +150,8 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.send.SendCmd(protocol.ListModels{}), m.send.SendCmd(protocol.ListSessions{})}
+	cmds := []tea.Cmd{m.send.SendCmd(protocol.ListModels{}), m.send.SendCmd(protocol.ListSessions{}),
+		m.send.SendCmd(protocol.ListProjects{})}
 	for _, id := range m.opts.Attach {
 		cmds = append(cmds, m.send.SendCmd(protocol.AttachSession{SessionID: id}))
 	}
@@ -176,9 +187,15 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.vault.SetBusy(false, "")
 	case sidebar.SelectMsg:
 		return m.selectSession(msg.SessionID, msg.TaskID)
-	case sidebar.NewSessionMsg:
-		m.active = ""
-		return m.setFocus(focusComposer)
+	case sidebar.NewChatMsg:
+		if msg.Workspace == "" {
+			return m.startNewChat(m.currentProject())
+		}
+		return m.startNewChat(msg.Workspace, msg.Name)
+	case sidebar.NewProjectMsg:
+		return m.askProject()
+	case composer.BannerMsg:
+		m.toggleShared()
 	case sidebar.OpenVaultMsg, modelpicker.OpenVaultMsg:
 		return m.openVault()
 	case sidebar.PopoutMsg:
@@ -245,6 +262,9 @@ func (m *Model) onEvent(ev protocol.Event) {
 	case protocol.SessionStarted:
 		if m.starting > 0 {
 			m.starting--
+			if sess := m.store.Session(ev.SessionID); sess != nil && sess.ParentID == "" {
+				m.chat = newChat{}
+			}
 			m.selectSession(ev.SessionID, "")
 		}
 	case protocol.Attached:
@@ -260,7 +280,87 @@ func (m *Model) onEvent(ev protocol.Event) {
 			m.flash = m.store.Notices[len(m.store.Notices)-1]
 			m.vault.SetBusy(false, m.flash)
 		}
+		if ev.SessionID == "" && m.starting > 0 {
+			m.starting--
+			m.store.DropStart()
+			if m.active == "" && strings.TrimSpace(m.composer.Value()) == "" {
+				m.composer.SetValue(m.lastStart)
+			}
+		}
 	}
+}
+
+func (m Model) currentProject() (string, string) {
+	if m.focus == focusSidebar {
+		if p, ok := m.sidebar.Project(); ok {
+			return p.Path, p.Name
+		}
+	}
+	if sess := m.store.Session(m.active); sess != nil && sess.Workspace != "" {
+		return sess.Workspace, state.ProjectName(sess.Workspace)
+	}
+	if p, ok := m.sidebar.Project(); ok {
+		return p.Path, p.Name
+	}
+	if m.store.DefaultWorkspace != "" {
+		return "", state.ProjectName(m.store.DefaultWorkspace)
+	}
+	return "", "this workspace"
+}
+
+func (m Model) target() (string, string) {
+	if m.chat.chosen {
+		return m.chat.workspace, m.chat.name
+	}
+	return m.currentProject()
+}
+
+func (m *Model) startNewChat(workspace, name string) tea.Cmd {
+	m.active, m.activeTask = "", ""
+	m.draft = nil
+	m.askPath = false
+	m.chat = newChat{workspace: workspace, name: name, chosen: true}
+	return m.setFocus(focusComposer)
+}
+
+func (m *Model) askProject() tea.Cmd {
+	m.active, m.activeTask = "", ""
+	m.draft = nil
+	m.askPath = true
+	return m.setFocus(focusComposer)
+}
+
+func (m *Model) chooseProject(text string) {
+	path := strings.Trim(strings.TrimSpace(text), `"'`)
+	m.askPath = false
+	m.chat = newChat{workspace: path, name: state.ProjectName(path), chosen: true}
+	m.flash = "new chat in " + m.chat.name + " · describe the task to start it"
+}
+
+func (m *Model) toggleShared() {
+	if m.active != "" || m.askPath || m.draft != nil {
+		m.flash = "memory is chosen when a chat starts · ctrl+n for a new chat"
+		return
+	}
+	m.chat.workspace, m.chat.name = m.target()
+	m.chat.chosen = true
+	m.chat.shared = !m.chat.shared
+}
+
+func (m Model) banner() string {
+	th := m.theme
+	if m.active != "" || m.draft != nil {
+		return ""
+	}
+	if m.askPath {
+		return th.Accent.Render("new project") + th.Muted.Render(" · type or paste a folder path · esc cancels")
+	}
+	_, name := m.target()
+	memory := th.Text.Render("private") + th.Muted.Render(" · ctrl+s shares it with "+name)
+	if m.chat.shared {
+		memory = th.Accent.Render("⇄ shared with "+name) + th.Muted.Render(" · ctrl+s makes it private")
+	}
+	return th.Accent.Render("new chat in "+name) + th.Muted.Render(" · memory: ") + memory
 }
 
 func (m *Model) sync() {
@@ -280,6 +380,7 @@ func (m *Model) sync() {
 	m.composer.SetModel(m.modelLabel())
 	m.composer.SetMode(m.modeLabel())
 	m.composer.SetPlaceholder(m.placeholder())
+	m.composer.SetBanner(m.banner())
 	if m.width == 0 {
 		return
 	}
@@ -329,14 +430,22 @@ func (m *Model) submit(text string) tea.Cmd {
 	if m.draft != nil {
 		return m.startSide(text)
 	}
+	if m.active == "" && m.askPath {
+		m.chooseProject(text)
+		return nil
+	}
 	if m.active == "" {
+		workspace, _ := m.target()
 		m.store.ExpectStart(state.PendingStart{Task: text, Mode: m.opts.Mode})
 		m.starting++
+		m.lastStart = text
 		return m.send.SendCmd(protocol.StartSession{
 			Task:           text,
 			ModelKey:       m.nextModel,
 			Mode:           m.opts.Mode,
 			PermissionMode: m.opts.Permission,
+			Workspace:      workspace,
+			SharedMemory:   m.chat.shared,
 		})
 	}
 	sess := m.store.Session(m.active)
@@ -522,6 +631,8 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 			return m.setFocus(focusComposer)
 		case m.draft != nil:
 			m.draft = nil
+		case m.askPath:
+			m.askPath = false
 		case m.transcript.HasSelection():
 			m.transcript.ClearSelection()
 		case m.activeTask != "":
@@ -529,9 +640,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case "ctrl+n":
-		m.active, m.activeTask = "", ""
-		m.draft = nil
-		return m.setFocus(focusComposer)
+		return m.startNewChat(m.currentProject())
+	case "ctrl+s":
+		m.toggleShared()
+		return nil
 	case "ctrl+p":
 		return m.openPicker()
 	case "ctrl+k":
@@ -691,8 +803,10 @@ func (m Model) placeholder() string {
 		return "this executor has finished · esc back to the orchestrator"
 	case m.activeTask != "":
 		return "message this executor…"
+	case m.active == "" && m.askPath:
+		return "folder path, for example C:\\Users\\you\\projects\\api"
 	case m.active == "":
-		return "describe a task to start a session…"
+		return "describe a task to start a chat…"
 	case sess != nil && (sess.Status == state.Done || sess.Status == state.Failed):
 		return "this session has ended · ctrl+n for a new one"
 	default:
@@ -705,11 +819,15 @@ func (m Model) hint() string {
 		return m.flash
 	}
 	if m.focus == focusSidebar {
-		return "↑↓ move · enter open · ←→ fold · ctrl+o new window · tab back"
+		return "↑↓ move · enter open · n new chat · p new project · ←→ fold · tab back"
 	}
 	switch {
 	case m.draft != nil:
 		return "enter starts the side chat · esc cancels"
+	case m.active == "" && m.askPath:
+		return "enter picks the folder · esc cancels"
+	case m.active == "":
+		return "enter starts the chat · ctrl+s shared memory · tab sidebar"
 	case m.activeTask != "":
 		return "enter messages this executor · esc back to the orchestrator"
 	case m.transcript.HasSelection():
@@ -809,8 +927,11 @@ func (m Model) header(width int) string {
 		left = th.Strong.Render("exec "+t.ID) + th.Muted.Render(" · from "+sidebar.Title(sess))
 	} else if m.draft != nil && sess != nil {
 		left = th.Strong.Render("side chat") + th.Muted.Render(" · from "+sidebar.Title(sess))
+	} else if sess == nil && m.askPath {
+		left = th.Strong.Render("new project")
 	} else if sess == nil {
-		left = th.Strong.Render("new session") + th.Muted.Render(" · "+m.opts.Mode)
+		_, name := m.target()
+		left = th.Strong.Render("new chat") + th.Muted.Render(" · in "+name+" · "+m.opts.Mode)
 	} else {
 		left = th.Strong.Render(sidebar.Title(sess)) + th.Muted.Render(details(sess.Mode, sess.PermissionMode, sess.Workspace))
 	}
