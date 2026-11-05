@@ -10,9 +10,10 @@ FINAL_STATUSES = frozenset(status.value for status, after in TRANSITIONS.items()
 def _session_started(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
     db.execute(
         "INSERT INTO sessions (id, parent_id, workspace, workspace_key, task, mode, permission_mode, model_key, "
-        "started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "memory_space, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (session_id, payload.get("parent_id"), payload["workspace"], workspace_key(payload["workspace"]),
-         payload["task"], payload["mode"], payload["permission_mode"], payload.get("model_key"), ts),
+         payload["task"], payload["mode"], payload["permission_mode"], payload.get("model_key"),
+         payload.get("memory_space") or payload.get("parent_id") or session_id, ts),
     )
 
 
@@ -63,11 +64,13 @@ def _task_status_changed(db: sqlite3.Connection, session_id: str, seq: int, ts: 
 
 
 def _memory_written(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
+    space_id = payload.get("space_id") or session_id
     db.execute(
-        "INSERT INTO memory_entries (session_id, entry_id, task_id, agent, kind, scope, content, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (session_id, payload["entry_id"], payload.get("task_id"), payload["agent"], payload["kind"],
-         json.dumps(payload.get("scope") or []), payload["content"], ts),
+        "INSERT INTO memory_entries (space_id, session_id, entry_id, task_id, agent, kind, scope, content, "
+        "created_at, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "(SELECT COALESCE(MAX(position), 0) + 1 FROM memory_entries WHERE space_id = ?))",
+        (space_id, session_id, payload["entry_id"], payload.get("task_id"), payload["agent"], payload["kind"],
+         json.dumps(payload.get("scope") or []), payload["content"], ts, space_id),
     )
 
 

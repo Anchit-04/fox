@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
-from store import Store
+from store import Store, project_space
 
 out = sys.stdout.buffer
 lock = threading.Lock()
@@ -47,7 +47,8 @@ def main() -> None:
             live.add(session_id)
             emit(session_id, "session_started", task=command["task"], workspace=args.workspace,
                  mode=command["mode"], permission_mode=command["permission_mode"],
-                 model_key=command["model_key"], parent_id=command["parent_session_id"])
+                 model_key=command["model_key"], parent_id=command["parent_session_id"],
+                 memory_space=project_space(args.workspace) if command.get("shared_memory") else session_id)
             emit(session_id, "agent_turn", task_id=None, model_key="fake", text=f"pid {os.getpid()}")
             emit(session_id, "awaiting_input", task_id=None)
         elif kind == "human_message":

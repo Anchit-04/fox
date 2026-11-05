@@ -34,6 +34,7 @@ class SessionInfo:
     mode: str
     permission_mode: str
     model_key: str | None
+    shared_memory: bool = False
     status: str = "running"
 
 
@@ -145,11 +146,13 @@ class Hub:
             return
         parent_id = msg.get("parent_session_id")
         session_id = str(uuid.uuid4())
+        shared = bool(msg.get("shared_memory"))
         if parent_id:
             worker = self._live_worker(parent_id)
             if worker is None:
                 await _reply(ws, {"type": "error", "message": f"unknown parent_session_id {parent_id!r}"})
                 return
+            shared = self.sessions[parent_id].shared_memory if parent_id in self.sessions else False
         else:
             try:
                 workspace = paths.validate_workspace(msg.get("workspace") or self.default_workspace,
@@ -161,17 +164,18 @@ class Hub:
 
         info = SessionInfo(session_id=session_id, parent_id=parent_id, workspace=worker.workspace, task=msg["task"],
                            mode=msg.get("mode") or "agent", permission_mode=permission_mode,
-                           model_key=msg.get("model_key"))
+                           model_key=msg.get("model_key"), shared_memory=shared)
         self.sessions[session_id] = info
         self.workers[session_id] = worker
         worker.sessions.add(session_id)
         self.subscribers[session_id].add(ws)
-        await _reply(ws, {"type": "session_started", "session_id": session_id, "workspace": worker.workspace})
+        await _reply(ws, {"type": "session_started", "session_id": session_id, "workspace": worker.workspace,
+                          "shared_memory": shared})
         self._broadcast_status(session_id)
 
         command = {"kind": "start_session", "session_id": session_id, "task": info.task,
                    "model_key": info.model_key, "mode": info.mode, "permission_mode": permission_mode,
-                   "parent_session_id": parent_id,
+                   "parent_session_id": parent_id, "shared_memory": shared and not parent_id,
                    "validated": {e.model_key: e.validated for e in vault.list_models() if e.validated is not None}}
         if parent_id:
             try:
@@ -289,7 +293,8 @@ class Hub:
         if self.store.session(session_id) is None:
             await self._emit(session_id, "session_started", {
                 "task": info.task, "workspace": info.workspace, "mode": info.mode,
-                "permission_mode": info.permission_mode, "model_key": info.model_key, "parent_id": info.parent_id})
+                "permission_mode": info.permission_mode, "model_key": info.model_key, "parent_id": info.parent_id,
+                "memory_space": None})
         await self._emit(session_id, "session_ended", {"task_id": None, "status": "failed", "final_text": text})
 
     async def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
@@ -323,7 +328,7 @@ class Hub:
         websockets.broadcast(self.clients, json.dumps({
             "type": "session_status", "session_id": session_id, "parent_id": info.parent_id,
             "workspace": info.workspace, "task": info.task, "status": info.status, "model_key": info.model_key,
-            "mode": info.mode, "permission_mode": info.permission_mode}))
+            "mode": info.mode, "permission_mode": info.permission_mode, "shared_memory": info.shared_memory}))
 
     async def _forward(self, ws, msg: dict, command: dict) -> bool:
         session_id = msg.get("session_id")

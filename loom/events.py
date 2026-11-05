@@ -9,13 +9,14 @@ def emit(event_sink: "EventSink | None", event_type: str, payload: dict) -> None
 
 
 EVENTS: dict[str, frozenset[str]] = {
-    "session_started": frozenset({"task", "workspace", "mode", "permission_mode", "model_key", "parent_id"}),
+    "session_started": frozenset({"task", "workspace", "mode", "permission_mode", "model_key", "parent_id",
+                                 "memory_space"}),
     "session_ended": frozenset({"status", "final_text"}),
     "agent_turn": frozenset({"task_id", "model_key", "text"}),
     "todo_updated": frozenset({"task_id", "checklist"}),
     "task_created": frozenset({"task_id", "description", "lane", "scope"}),
     "task_status_changed": frozenset({"task_id", "status", "error", "report", "model_key"}),
-    "memory_written": frozenset({"task_id", "entry_id", "agent", "kind", "scope", "content"}),
+    "memory_written": frozenset({"task_id", "entry_id", "space_id", "agent", "kind", "scope", "content"}),
     "tool_call": frozenset({"task_id", "name", "args"}),
     "tool_result": frozenset({"task_id", "name", "content"}),
     "tool_denied": frozenset({"task_id", "name", "reason"}),

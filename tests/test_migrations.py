@@ -58,6 +58,32 @@ class Migrate(unittest.TestCase):
         keys = {row[0] for row in db.execute("SELECT workspace_key FROM sessions")}
         self.assertEqual(len(keys), 1 if sys.platform == "win32" else 2)
 
+    def test_existing_memory_moves_into_each_sessions_own_space(self):
+        db = fresh()
+        with mock.patch.object(migrations, "MIGRATIONS", MIGRATIONS[:3]):
+            migrate(db)
+        for session_id, parent in (("root", None), ("side", "root"), ("other", None)):
+            db.execute("INSERT INTO sessions (id, parent_id, workspace, workspace_key, task, mode, permission_mode, "
+                       "started_at) VALUES (?, ?, 'w', 'w', 't', 'agent', 'workspace-write', 'then')",
+                       (session_id, parent))
+        for session_id, entry_id, created in (("root", "note_2", "b"), ("root", "note_1", "a"),
+                                              ("other", "note_1", "a"), ("root", "t1", "c")):
+            db.execute("INSERT INTO memory_entries (session_id, entry_id, agent, kind, content, created_at) "
+                       "VALUES (?, ?, 'a', ?, 'x', ?)",
+                       (session_id, entry_id, "note" if entry_id.startswith("note") else "task_result", created))
+        migrate(db)
+        self.assertEqual(dict(db.execute("SELECT id, memory_space FROM sessions")),
+                         {"root": "root", "side": "root", "other": "other"})
+        rows = db.execute("SELECT space_id, session_id, entry_id, position FROM memory_entries "
+                          "ORDER BY space_id, position").fetchall()
+        self.assertEqual(rows, [("other", "other", "note_1", 1), ("root", "root", "note_1", 1),
+                                ("root", "root", "note_2", 2), ("root", "root", "t1", 3)])
+        db.execute("INSERT INTO memory_entries (space_id, session_id, entry_id, agent, kind, content, created_at, "
+                   "position) VALUES ('project:w', 'other', 'note_1', 'a', 'note', 'x', 'd', 1)")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO memory_entries (space_id, session_id, entry_id, agent, kind, content, "
+                       "created_at, position) VALUES ('root', 'other', 'note_1', 'a', 'note', 'x', 'd', 9)")
+
     def test_a_newer_database_is_refused(self):
         db = fresh()
         db.execute(f"PRAGMA user_version = {len(MIGRATIONS) + 1}")

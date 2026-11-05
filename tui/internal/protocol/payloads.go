@@ -1,5 +1,7 @@
 package protocol
 
+import "strings"
+
 type SessionStartedPayload struct {
 	Task           string  `json:"task"`
 	Workspace      string  `json:"workspace"`
@@ -7,6 +9,8 @@ type SessionStartedPayload struct {
 	PermissionMode string  `json:"permission_mode"`
 	ModelKey       *string `json:"model_key"`
 	ParentID       *string `json:"parent_id"`
+	MemorySpace    *string `json:"memory_space"`
+	SharedMemory   *bool   `json:"shared_memory"`
 }
 
 type SessionEndedPayload struct {
@@ -127,6 +131,7 @@ type SessionView struct {
 	Todos          string   `json:"todos"`
 	StartedAt      string   `json:"started_at"`
 	EndedAt        *string  `json:"ended_at"`
+	MemorySpace    *string  `json:"memory_space"`
 	Turns          []Stored `json:"turns"`
 }
 
@@ -154,8 +159,19 @@ type SessionSummary struct {
 	PermissionMode string  `json:"permission_mode"`
 	ModelKey       *string `json:"model_key"`
 	Status         string  `json:"status"`
+	SharedMemory   bool    `json:"shared_memory"`
 }
 
 type SessionsPayload struct {
 	Sessions []SessionSummary `json:"sessions"`
+}
+
+type ProjectsPayload struct {
+	Current string `json:"current"`
+}
+
+const ProjectSpacePrefix = "project:"
+
+func IsProjectSpace(space *string) bool {
+	return space != nil && strings.HasPrefix(*space, ProjectSpacePrefix)
 }

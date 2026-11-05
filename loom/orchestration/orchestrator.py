@@ -237,14 +237,14 @@ def _wait_for_everything(run: _Run) -> None:
 
 def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Memory | None = None,
                      event_sink=None, injection_queue: InjectionQueue | None = None, approver=None,
-                     mode: str = permissions.WORKSPACE_WRITE) -> str:
+                     mode: str = permissions.WORKSPACE_WRITE, notes_seen: int = 0) -> str:
     if mode not in permissions.MODES:
         raise ValueError(f"unknown session mode {mode!r}; expected one of {permissions.MODES}")
     model_key = model_key or routing.pick_orchestrator()
     provider = get_provider(model_key)
     run = _Run(model_key=model_key, mode=mode, mem=mem or memory.default_memory(),
                registry=TaskRegistry(), todo=TodoManager(), event_sink=event_sink,
-               injection_queue=injection_queue, approver=approver or DenyApprover())
+               injection_queue=injection_queue, approver=approver or DenyApprover(), notes_seen=notes_seen)
     tools = orchestrator_tools(mode)
     file_tools.clear_approved_paths()
 

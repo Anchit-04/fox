@@ -73,6 +73,7 @@ type Session struct {
 	CostPartial    bool
 	InputTokens    int
 	OutputTokens   int
+	SharedMemory   bool
 	Unread         bool
 	Loaded         bool
 	lastSeq        int
@@ -97,12 +98,13 @@ type Project struct {
 }
 
 type Store struct {
-	Sessions  map[string]*Session
-	Order     []string
-	Approvals []Approval
-	Models    []protocol.VaultEntry
-	Notices   []string
-	pending   []PendingStart
+	Sessions         map[string]*Session
+	Order            []string
+	Approvals        []Approval
+	Models           []protocol.VaultEntry
+	Notices          []string
+	DefaultWorkspace string
+	pending          []PendingStart
 }
 
 func New() *Store {
@@ -111,6 +113,19 @@ func New() *Store {
 
 func (s *Store) ExpectStart(p PendingStart) {
 	s.pending = append(s.pending, p)
+}
+
+func (s *Store) DropStart() {
+	if len(s.pending) > 0 {
+		s.pending = s.pending[1:]
+	}
+}
+
+func ProjectName(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "this workspace"
+	}
+	return filepath.Base(filepath.Clean(path))
 }
 
 func (s *Store) Session(id string) *Session {
@@ -147,11 +162,7 @@ func (s *Store) Projects() []Project {
 		key := workspaceKey(sess.Workspace)
 		i, ok := index[key]
 		if !ok {
-			name := filepath.Base(sess.Workspace)
-			if sess.Workspace == "" {
-				name = "this workspace"
-			}
-			projects = append(projects, Project{Path: sess.Workspace, Name: name})
+			projects = append(projects, Project{Path: sess.Workspace, Name: ProjectName(sess.Workspace)})
 			i = len(projects) - 1
 			index[key] = i
 		}

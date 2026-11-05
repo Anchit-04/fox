@@ -440,3 +440,62 @@ func TestModelErrorPausesUntilAMessageArrives(t *testing.T) {
 		t.Fatalf("after retry status = %v, want Working", sess.Status)
 	}
 }
+
+func TestSharedMemoryFromEverySource(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_status","session_id":"st","workspace":"/w/api","task":"t","status":"running","shared_memory":true}`)
+	feed(t, s, `{"type":"sessions","sessions":[{"session_id":"ls","workspace":"/w/api","task":"t","status":"done","shared_memory":true},{"session_id":"lp","workspace":"/w/api","task":"t","status":"done","shared_memory":false}]}`)
+	feed(t, s, `{"session_id":"ev","seq":1,"type":"session_started","task":"t","workspace":"/w/api","memory_space":"project:/w/api"}`)
+	feed(t, s, `{"session_id":"pv","seq":1,"type":"session_started","task":"t","workspace":"/w/api","memory_space":"pv"}`)
+	feed(t, s, `{"session_id":"rp","type":"session_started","workspace":"/w/api","shared_memory":true}`)
+	space := "project:/w/api"
+	attach(t, s, "at", protocol.SessionView{Task: "t", Workspace: "/w/api", Status: "done", MemorySpace: &space})
+	for id, want := range map[string]bool{"st": true, "ls": true, "lp": false, "ev": true, "pv": false, "rp": true, "at": true} {
+		if got := s.Session(id).SharedMemory; got != want {
+			t.Errorf("%s: SharedMemory = %v, want %v", id, got, want)
+		}
+	}
+}
+
+func TestProjectsReplyRecordsTheDefaultWorkspace(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"projects","current":"C:/work/shop","projects":[]}`)
+	if s.DefaultWorkspace != "C:/work/shop" {
+		t.Fatalf("DefaultWorkspace = %q", s.DefaultWorkspace)
+	}
+	if got := ProjectName(s.DefaultWorkspace); got != "shop" {
+		t.Fatalf("ProjectName = %q", got)
+	}
+	if got := ProjectName(""); got != "this workspace" {
+		t.Fatalf("ProjectName of nothing = %q", got)
+	}
+}
+
+func TestDropStartForgetsAFailedStart(t *testing.T) {
+	s := New()
+	s.ExpectStart(PendingStart{Task: "in a folder that does not exist"})
+	s.ExpectStart(PendingStart{Task: "in the api folder"})
+	s.DropStart()
+	feed(t, s, `{"session_id":"s1","type":"session_started","workspace":"/w/api"}`)
+	if got := s.Session("s1").Task; got != "in the api folder" {
+		t.Fatalf("task = %q", got)
+	}
+	s.DropStart()
+	if len(s.pending) != 0 {
+		t.Fatalf("pending = %+v", s.pending)
+	}
+}
+
+func TestChatsInTwoProjectsGroupSeparately(t *testing.T) {
+	s := New()
+	start(t, s, "a1", "/w/shop")
+	start(t, s, "b1", "/w/api")
+	start(t, s, "a2", "/w/shop")
+	projects := s.Projects()
+	if len(projects) != 2 || projects[0].Name != "shop" || projects[1].Name != "api" {
+		t.Fatalf("projects = %+v", projects)
+	}
+	if got := ids(projects[0].Sessions); !slices.Equal(got, []string{"a1", "a2"}) {
+		t.Fatalf("shop chats = %v", got)
+	}
+}

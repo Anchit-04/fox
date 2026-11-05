@@ -27,6 +27,9 @@ func (s *Store) Apply(ev protocol.Event) {
 		}
 		return
 	case protocol.Projects:
+		if p, err := protocol.Payload[protocol.ProjectsPayload](ev); err == nil && p.Current != "" {
+			s.DefaultWorkspace = p.Current
+		}
 		return
 	}
 
@@ -149,6 +152,9 @@ func (s *Store) applyAttached(ev protocol.Event) {
 	if view.ParentID != nil {
 		sess.ParentID = *view.ParentID
 	}
+	if view.MemorySpace != nil {
+		sess.SharedMemory = protocol.IsProjectSpace(view.MemorySpace)
+	}
 	for _, turn := range view.Turns {
 		s.Apply(protocol.FromStored(ev.SessionID, turn))
 	}
@@ -193,6 +199,7 @@ func (s *Store) summarize(p protocol.SessionSummary) {
 	if p.ModelKey != nil {
 		sess.Model = *p.ModelKey
 	}
+	sess.SharedMemory = p.SharedMemory
 	sess.Status = serverStatus(p.Status)
 }
 
@@ -230,6 +237,12 @@ func (s *Store) applySessionStarted(sess *Session, ev protocol.Event) {
 	}
 	if p.Workspace != "" {
 		sess.Workspace = p.Workspace
+	}
+	if p.SharedMemory != nil {
+		sess.SharedMemory = *p.SharedMemory
+	}
+	if p.MemorySpace != nil {
+		sess.SharedMemory = protocol.IsProjectSpace(p.MemorySpace)
 	}
 	if p.Mode != "" {
 		sess.Mode = p.Mode

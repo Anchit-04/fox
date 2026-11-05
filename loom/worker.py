@@ -75,14 +75,15 @@ def side_conversation_task(store: Store, question: str, parent: Session) -> str:
     if todos:
         parts.append(f"\nProgress so far:\n{todos}")
     if parent.mem is not None:
-        index = parent.mem.read_index()
+        index = parent.mem.read_index(limit=memory.INDEX_LIMIT)
         if index and index != "(empty)":
             parts.append(f"\nShared memory index (pull a full entry with memory_read):\n{index}")
     parts.append(f"\nQuestion: {question}")
     return "\n".join(parts)
 
 
-def run_session(session: Session, task: str, model_key: str | None, mode: str, permission_mode: str) -> None:
+def run_session(session: Session, task: str, model_key: str | None, mode: str, permission_mode: str,
+                notes_seen: int = 0) -> None:
     status = "done"
     try:
         if mode == "orchestrator":
@@ -90,7 +91,7 @@ def run_session(session: Session, task: str, model_key: str | None, mode: str, p
                 task, model_key=model_key,
                 event_sink=session.handle_event, mem=session.mem,
                 injection_queue=session.injection_queue,
-                approver=session.approval_gate, mode=permission_mode,
+                approver=session.approval_gate, mode=permission_mode, notes_seen=notes_seen,
             )
         else:
             final = agent.run_agent(
@@ -138,16 +139,21 @@ class Worker:
         task = side_conversation_task(self.store, command["task"], parent) if parent else command["task"]
         mode = command.get("mode") or "agent"
         permission_mode = command.get("permission_mode") or permissions.WORKSPACE_WRITE
+        shared = parent is None and bool(command.get("shared_memory"))
         session = Session(self.store, session_id)
+        session.mem = parent.mem if parent is not None else memory.Memory.for_chat(
+            self.store, session_id, paths.workspace(), shared)
         with self.lock:
             self.sessions[session_id] = session
         session.handle_event("session_started", {
             "task": task, "workspace": str(paths.workspace()), "mode": mode, "permission_mode": permission_mode,
-            "model_key": command.get("model_key"), "parent_id": parent_id,
+            "model_key": command.get("model_key"), "parent_id": parent_id, "memory_space": session.mem.write_space,
         })
-        session.mem = parent.mem if parent is not None else memory.Memory(self.store, session_id)
+        notes_seen, index = session.mem.join() if shared else (0, "")
+        prompt = f"{task}\n\n{index}" if index else task
         session.thread = threading.Thread(target=self._run, daemon=True,
-                                          args=(session, task, command.get("model_key"), mode, permission_mode))
+                                          args=(session, prompt, command.get("model_key"), mode, permission_mode,
+                                                notes_seen))
         session.thread.start()
 
     def _run(self, session: Session, *args) -> None:

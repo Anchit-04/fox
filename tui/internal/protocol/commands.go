@@ -12,6 +12,8 @@ type StartSession struct {
 	Mode            string `json:"mode,omitempty"`
 	PermissionMode  string `json:"permission_mode,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	Workspace       string `json:"workspace,omitempty"`
+	SharedMemory    bool   `json:"shared_memory,omitempty"`
 }
 
 type AttachSession struct {
@@ -43,6 +45,8 @@ type ListModels struct {
 
 type ListSessions struct{}
 
+type ListProjects struct{}
+
 type SetModelKey struct {
 	ModelKey string `json:"model_key"`
 	Value    string `json:"value"`
@@ -56,6 +60,7 @@ func (ApprovalResponse) Kind() string { return "approval_response" }
 func (ListModels) Kind() string       { return "list_models" }
 func (SetModelKey) Kind() string      { return "set_model_key" }
 func (ListSessions) Kind() string     { return "list_sessions" }
+func (ListProjects) Kind() string     { return "list_projects" }
 
 func Encode(c Command) ([]byte, error) {
 	body, err := json.Marshal(c)

@@ -109,3 +109,24 @@ func TestEncodeKeepsDenial(t *testing.T) {
 		t.Fatalf("approved should be present and false, got %v (present: %v)", v, ok)
 	}
 }
+
+func TestStartSessionCarriesWorkspaceAndSharedMemory(t *testing.T) {
+	got := encodeToMap(t, StartSession{Task: "fix it", Workspace: `C:\work\api`, SharedMemory: true})
+	if got["type"] != "start_session" || got["workspace"] != `C:\work\api` || got["shared_memory"] != true {
+		t.Fatalf("encoded = %v", got)
+	}
+	plain := encodeToMap(t, StartSession{Task: "fix it"})
+	if _, ok := plain["workspace"]; ok {
+		t.Fatalf("empty workspace was sent: %v", plain)
+	}
+	if _, ok := plain["shared_memory"]; ok {
+		t.Fatalf("private chat sent shared_memory: %v", plain)
+	}
+}
+
+func TestProjectSpaces(t *testing.T) {
+	shared, private, empty := "project:c:/work/api", "a3f1-uuid", ""
+	if !IsProjectSpace(&shared) || IsProjectSpace(&private) || IsProjectSpace(&empty) || IsProjectSpace(nil) {
+		t.Fatal("IsProjectSpace misread a space id")
+	}
+}

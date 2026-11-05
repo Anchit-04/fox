@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "loom"))
 
-from store import Store
+from store import Store, project_space
 
 SCRIPTED = ROOT / "tests" / "scripted_worker.py"
 
@@ -127,6 +127,30 @@ class WorkerProcess(unittest.TestCase):
         side = self.until("session_started")[-1]
         self.assertEqual((side["session_id"], side["parent_id"]), ("side", "s1"))
         self.assertIn("Question: why?", side["task"])
+
+    def test_a_private_chat_writes_to_its_own_space(self):
+        self.start()
+        started = self.until("session_started")[-1]
+        self.assertEqual(started["memory_space"], "s1")
+
+    def test_a_shared_chat_joins_the_project_space_and_sees_a_capped_index(self):
+        space = project_space(self.folder.resolve())
+        with Store.open(self.db) as store:
+            store.append_event("early", "session_started", {
+                "task": "t", "workspace": str(self.folder), "mode": "agent", "permission_mode": "workspace-write",
+                "model_key": None, "parent_id": None, "memory_space": space})
+            for i in range(25):
+                store.append_note("early", space, "earl.", {"task_id": None, "agent": "a", "scope": [],
+                                                             "content": f"n{i}"})
+        self.send(kind="start_session", session_id="s1", task="what is this?", model_key="nemotron-super",
+                  mode="agent", permission_mode="workspace-write", parent_session_id=None, shared_memory=True)
+        events = self.until("awaiting_input")
+        self.assertEqual(events[0]["memory_space"], space)
+        self.assertEqual(events[0]["task"], "what is this?")
+        reply = next(e["text"] for e in events if e["type"] == "agent_turn")
+        self.assertIn("written 25 entries before you joined", reply)
+        self.assertIn("id=earl.note_25", reply)
+        self.assertNotIn("id=earl.note_5 ", reply)
 
     def test_ready_is_fast(self):
         self.assertLess(self.ready_seconds, 3.0)

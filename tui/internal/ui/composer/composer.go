@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"fox/tui/internal/ui/theme"
 )
@@ -19,6 +20,8 @@ type OpenPickerMsg struct{}
 
 type ToggleModeMsg struct{}
 
+type BannerMsg struct{}
+
 const (
 	minLines = 1
 	maxLines = 6
@@ -27,11 +30,12 @@ const (
 )
 
 type Model struct {
-	theme *theme.Theme
-	input textarea.Model
-	width int
-	model string
-	mode  string
+	theme  *theme.Theme
+	input  textarea.Model
+	width  int
+	model  string
+	mode   string
+	banner string
 }
 
 func New(th *theme.Theme) Model {
@@ -70,6 +74,10 @@ func (m *Model) SetMode(mode string) {
 	m.mode = mode
 }
 
+func (m *Model) SetBanner(s string) {
+	m.banner = s
+}
+
 func (m *Model) SetPlaceholder(s string) {
 	m.input.Placeholder = s
 }
@@ -87,6 +95,9 @@ func (m Model) Focused() bool {
 }
 
 func (m Model) Height() int {
+	if m.banner != "" {
+		return m.input.Height() + chrome + 1
+	}
 	return m.input.Height() + chrome
 }
 
@@ -120,6 +131,9 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (m *Model) Press(x, y int) tea.Cmd {
+	if m.banner != "" && y == 0 {
+		return func() tea.Msg { return BannerMsg{} }
+	}
 	if y == m.Height()-1 {
 		modelW, modeW := lipgloss.Width(m.chipView()), lipgloss.Width(m.modeView())
 		switch {
@@ -153,7 +167,11 @@ func (m Model) View(hint string) string {
 	chipW := lipgloss.Width(chip)
 	left := th.Muted.Render(clip(hint, max(m.width-chipW-2, 0)))
 	gap := max(m.width-lipgloss.Width(left)-chipW, 1)
-	return box + "\n" + left + strings.Repeat(" ", gap) + chip
+	view := box + "\n" + left + strings.Repeat(" ", gap) + chip
+	if m.banner != "" {
+		view = ansi.Truncate(m.banner, max(m.width, 1), "…") + "\n" + view
+	}
+	return view
 }
 
 func displayRows(s string, width int) int {

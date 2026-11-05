@@ -15,7 +15,7 @@ import websockets
 from websockets.asyncio.client import connect
 
 import server
-from store import Store
+from store import Store, project_space
 
 FAKE = [sys.executable, str(ROOT / "tests" / "fake_worker.py")]
 WAIT = 15
@@ -126,6 +126,29 @@ class StartingAndRouting(HubCase):
         side = await tui.start(parent_session_id=parent)
         self.assertEqual(tui.pid(await tui.event(side, "agent_turn")), pid)
         self.assertEqual(self.store.session(side)["parent_id"], parent)
+
+    async def test_a_chat_in_a_second_project_with_shared_memory(self):
+        tui = await self.client()
+        private = await tui.start()
+        await tui.event(private, "awaiting_input")
+        await tui.send(type="start_session", task="do it", model_key="fake", mode="agent",
+                       workspace=str(self.project_b), shared_memory=True)
+        reply = await tui.until(lambda m: m.get("type") == "session_started" and "seq" not in m)
+        shared = reply["session_id"]
+        self.assertEqual((reply["workspace"], reply["shared_memory"]), (str(self.project_b.resolve()), True))
+        status = await tui.until(lambda m: m.get("type") == "session_status" and m["session_id"] == shared)
+        self.assertTrue(status["shared_memory"])
+        await tui.event(shared, "awaiting_input")
+        self.assertEqual(self.store.session(shared)["memory_space"], project_space(self.project_b))
+        self.assertEqual(self.store.session(private)["memory_space"], private)
+        side = await tui.start(parent_session_id=shared)
+        side_status = await tui.until(lambda m: m.get("type") == "session_status" and m["session_id"] == side)
+        self.assertTrue(side_status["shared_memory"])
+        await tui.send(type="list_sessions")
+        rows = {s["session_id"]: s for s in (await tui.until(lambda m: m.get("type") == "sessions"))["sessions"]}
+        self.assertTrue(rows[shared]["shared_memory"])
+        self.assertFalse(rows[private]["shared_memory"])
+        self.assertEqual(rows[shared]["workspace"], str(self.project_b.resolve()))
 
     async def test_bad_workspace_and_unknown_sessions_are_errors(self):
         tui = await self.client()
