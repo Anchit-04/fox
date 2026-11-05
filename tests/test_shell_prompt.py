@@ -36,6 +36,10 @@ class ShellIsStatedExactly(unittest.TestCase):
         self.assertIn(f"DefaultTimeout             = {sandbox_client.COMMAND_TIMEOUT_SECONDS} * time.Second",
                       main_go.read_text(encoding="utf-8"))
 
+    def test_the_note_warns_that_started_programs_are_closed(self):
+        self.assertIn("closed when the command ends", sandbox_client.SHELL_NOTE)
+        self.assertIn("browser_open", sandbox_client.SHELL_NOTE)
+
 
 if __name__ == "__main__":
     unittest.main()

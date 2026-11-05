@@ -29,6 +29,7 @@ MODEL_REGISTRY = {
         "price": {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
         "env_key": "ANTHROPIC_API_KEY",
         "tier": "strong",
+        "vision": True,
     },
     "claude-haiku": {
         "provider": "anthropic",
@@ -38,6 +39,7 @@ MODEL_REGISTRY = {
                                    "cache_write": 0.625}},
         "env_key": "ANTHROPIC_API_KEY",
         "tier": "cheap",
+        "vision": True,
     },
     "gemini-lite": {
         "provider": "gemini",
@@ -45,6 +47,7 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
         "tier": "cheap",
+        "vision": True,
     },
     "gemini-flash": {
         "provider": "gemini",
@@ -52,6 +55,7 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
         "tier": "cheap",
+        "vision": True,
     },
     "deepseek-chat": {
         "provider": "openai_compatible",
@@ -60,6 +64,7 @@ MODEL_REGISTRY = {
         "env_key": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com",
         "tier": "cheap",
+        "vision": False,
     },
     "kimi-k2": {
         "provider": "openai_compatible",
@@ -68,6 +73,7 @@ MODEL_REGISTRY = {
         "env_key": "MOONSHOT_API_KEY",
         "base_url": "https://api.moonshot.ai/v1",
         "tier": "cheap",
+        "vision": False,
     },
     # OpenRouter — one key, many models. These point at :free variants
     # (rate-limited: ~20 req/min, ~50 req/day until $10 lifetime spend).
@@ -84,6 +90,7 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "cheap",
+        "vision": False,
     },
     # Fastest verified free model — ~1.7s to first tool call, which is what
     # makes a live agent loop feel responsive rather than hung.
@@ -94,6 +101,7 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "cheap",
+        "vision": True,
     },
     # 1M context — the one to reach for when a task reads a lot of files.
     # ~6.5s/call. Its 550b sibling is nemotron-ultra below: it tool-calls but was ~39s/call when measured.
@@ -104,6 +112,7 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "cheap",
+        "vision": False,
     },
     "nemotron-ultra": {
         "provider": "openai_compatible",
@@ -112,6 +121,7 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "strong",
+        "vision": False,
     },
     "nemotron-super": {
         "provider": "openai_compatible",
@@ -120,6 +130,7 @@ MODEL_REGISTRY = {
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
         "tier": "strong",
+        "vision": True,
     },
 }
 
@@ -138,7 +149,12 @@ def get_provider(key: str):
     model_id = cfg.pop("model_id")
     cfg.pop("tier", None)  # routing/vault metadata, not a Provider constructor arg
     cfg.pop("price", None)
+    cfg.pop("vision", None)
     return provider_cls(model_id=model_id, **cfg)
+
+
+def has_vision(key: str) -> bool:
+    return bool(MODEL_REGISTRY.get(key, {}).get("vision"))
 
 
 def get_tier(key: str) -> str:

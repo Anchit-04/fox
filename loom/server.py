@@ -10,6 +10,8 @@ import websockets
 
 import paths
 import permissions
+from browser import launch as browser_launch
+from browser.launch import close_shared_browser
 from config import vault
 from store import Store
 
@@ -75,8 +77,10 @@ def session_status(event_type: str, payload: dict, current: str) -> str:
 
 class Hub:
     def __init__(self, store: Store, *, db_path: Path, default_workspace: Path, log_dir: Path,
-                 allow_unsafe: bool = False, worker_command: list[str] | None = None):
+                 allow_unsafe: bool = False, worker_command: list[str] | None = None,
+                 browser_profile: Path | None = None):
         self.store = store
+        self.browser_profile = browser_profile
         self.db_path = db_path
         self.default_workspace = default_workspace
         self.log_dir = log_dir
@@ -431,6 +435,8 @@ class Hub:
                 worker.process.kill()
         if waiting:
             await asyncio.wait(waiting, timeout=5)
+        if self.browser_profile is not None:
+            await asyncio.to_thread(close_shared_browser, self.browser_profile)
 
 
 async def _reply(ws, message: dict) -> None:
@@ -475,7 +481,8 @@ if __name__ == "__main__":
 
     hub_store = Store.open(paths.db_path())
     hub = Hub(hub_store, db_path=paths.db_path(), default_workspace=default_workspace,
-              log_dir=paths.FOX_HOME / "logs", allow_unsafe=args.allow_unsafe_workspace)
+              log_dir=paths.FOX_HOME / "logs", allow_unsafe=args.allow_unsafe_workspace,
+              browser_profile=browser_launch.profile_dir())
     interrupted = hub.mark_interrupted()
     # Printed prominently because it's inferred from cwd when not passed, and
     # launching from the wrong directory is otherwise invisible until the agent

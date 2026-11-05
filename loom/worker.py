@@ -21,6 +21,7 @@ from config import routing, vault
 from injection import InjectionQueue
 from orchestration.orchestrator import run_orchestrator
 from store import Store
+from tools import browser_tools
 
 SHUTDOWN_GRACE_SECONDS = 10
 INTERRUPTED = "interrupted: server stopped"
@@ -220,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-unsafe-workspace", action="store_true")
     args = parser.parse_args(argv)
     paths.set_workspace(args.workspace, allow_unsafe=args.allow_unsafe_workspace)
+    browser_tools.hub_owns_browser()
     worker = Worker(Store.open(args.db, migrate=False))
     threading.Thread(target=worker.read_commands, args=(_COMMANDS,), daemon=True).start()
     send({"kind": "ready", "pid": os.getpid()})

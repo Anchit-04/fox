@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -123,5 +124,66 @@ func TestCtrlNStartsANewChatInTheActiveChatsProject(t *testing.T) {
 	m.update(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
 	if m.active != "" || m.chat.workspace != "/w/api" || m.chat.name != "api" {
 		t.Fatalf("active %q chat %+v", m.active, m.chat)
+	}
+}
+
+func startHandoff(t *testing.T, m *Model) {
+	t.Helper()
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop"}`)
+	m.active = "s1"
+	event(t, m, `{"type":"approval_requested","session_id":"s1","task_id":"t2","request_id":"handoff_1","kind":"handoff","tool_name":"browser_ask_human","args":{"url":"https://github.com/login"},"description":"sign in on github.com"}`)
+}
+
+func TestAHandoffIsAStatusLineNotABox(t *testing.T) {
+	m, _ := newApp(t)
+	startHandoff(t, m)
+	if _, _, modal := m.pendingApproval(); modal {
+		t.Fatal("a handoff must not open the approval box")
+	}
+	line := m.statusLine()
+	for _, want := range []string{"waiting for you in the browser", "exec t2", "sign in on github.com", "ctrl+g skip"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("status line %q is missing %q", line, want)
+		}
+	}
+}
+
+func TestCtrlGSkipsTheHandoff(t *testing.T) {
+	m, r := newApp(t)
+	startHandoff(t, m)
+	m.update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	var got *protocol.ApprovalResponse
+	for _, c := range r.sent {
+		if a, ok := c.(protocol.ApprovalResponse); ok {
+			got = &a
+		}
+	}
+	if got == nil || got.RequestID != "handoff_1" || got.Approved || got.Always {
+		t.Fatalf("ctrl+g sent %+v", got)
+	}
+	if _, ok := m.pendingHandoff(); ok {
+		t.Fatal("the handoff is still pending after ctrl+g")
+	}
+}
+
+func TestTheHandoffLineGoesWhenTheAgentCarriesOn(t *testing.T) {
+	m, _ := newApp(t)
+	startHandoff(t, m)
+	event(t, m, `{"type":"tool_result","session_id":"s1","task_id":"t2","name":"browser_type","content":"The human finished the step."}`)
+	if _, ok := m.pendingHandoff(); ok {
+		t.Fatal("the handoff line should clear once the tool result arrives")
+	}
+}
+
+func TestOrdinaryApprovalsStillUseTheBox(t *testing.T) {
+	m, _ := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop"}`)
+	m.active = "s1"
+	event(t, m, `{"type":"approval_requested","session_id":"s1","request_id":"approval_1","tool_name":"run_bash_command","args":{"command":"curl x"},"description":"run: curl x"}`)
+	if _, _, modal := m.pendingApproval(); !modal {
+		t.Fatal("an ordinary approval should still open the box")
+	}
+	if _, ok := m.pendingHandoff(); ok {
+		t.Fatal("an ordinary approval is not a handoff")
 	}
 }

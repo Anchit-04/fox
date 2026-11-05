@@ -15,12 +15,13 @@ from typing import Callable
 from tools import file_tools
 from tools.file_tools import FILE_TOOLS, FILE_TOOL_HANDLERS
 from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
+from tools import browser_tools
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
 import context
 from context import MAX_ITERATIONS, build_compact_input
-from providers import get_provider, Turn, ToolResult
+from providers import ToolOutput, get_provider, has_vision, Turn, ToolResult
 from sandbox.sandbox_client import SHELL_NOTE, run_bash_command
 import memory
 from events import EventSink, emit
@@ -77,7 +78,7 @@ Rules:
 def build_system_prompt(model_key: str) -> str:
     """Fox identity + the tool/behaviour rules. Built per run rather than
     stored as a constant, since the identity block names the live model."""
-    return IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE
+    return IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + browser_tools.prompt_note(model_key)
 
 # --- Tool definitions --------------------------------------------------------
 # Plain JSON-schema dicts — each provider adapter converts these to its own
@@ -144,7 +145,7 @@ def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
 
 def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
                   extra_handlers: dict | None = None, event_sink: "EventSink | None" = None,
-                  task_id: str | None = None, verbose: bool = False, claims=None) -> str:
+                  task_id: str | None = None, verbose: bool = False, claims=None) -> "str | ToolOutput":
     args = tc.args
     if tc.raw and tc.raw.get("args_parse_error"):
         # Adapter couldn't parse this call's JSON args — don't execute
@@ -199,7 +200,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
               mode: str = permissions.WORKSPACE_WRITE, approver=None,
               tools: list[dict] | None = None, extra_handlers: dict | None = None,
-              stop_when: Callable[[], bool] | None = None, claims=None) -> str:
+              stop_when: Callable[[], bool] | None = None, claims=None, browse: bool = True) -> str:
     """mode is the sandbox axis (read-only / workspace-write / full-access);
     `approver` is the approval axis — who gets asked when policy says ASK.
     They're independent on purpose: see permissions.py.
@@ -225,16 +226,36 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     todo_manager = TodoManager()  # own instance per run — never shared, no lock needed
     mem = mem or memory.default_memory()
     tools = tools if tools is not None else ALL_TOOLS
+    browser = browser_tools.BrowserSession(model_key, mode=mode, approver=approver, task_id=task_id,
+                                           event_sink=event_sink) if browse else None
+    if browser is not None:
+        extra_handlers = {**(extra_handlers or {}), **browser.handlers()}
+    try:
+        return _loop(task, verbose=verbose, model_key=model_key, provider=provider, system_prompt=system_prompt,
+                     todo_manager=todo_manager, mem=mem, tools=tools, browser=browser, task_id=task_id,
+                     event_sink=event_sink, injection_queue=injection_queue, keep_alive=keep_alive, mode=mode,
+                     approver=approver, extra_handlers=extra_handlers, stop_when=stop_when, claims=claims)
+    finally:
+        if browser is not None:
+            browser.close()
+        file_tools.clear_approved_paths()
 
+
+def _loop(task: str, *, verbose: bool, model_key: str, provider, system_prompt: str, todo_manager: TodoManager,
+          mem: memory.Memory, tools: list[dict], browser, task_id, event_sink, injection_queue, keep_alive: bool,
+          mode: str, approver, extra_handlers, stop_when, claims) -> str:
     # This list IS the conversation — resent in full every call.
     history = History(task)
+    sees = has_vision(model_key)
 
     turn_count = 0
     final_text = ""
     while True:
         if injection_queue is not None:
             history.add_human_messages(injection_queue.drain(task_id), task_id, event_sink)
-        provider, response = generate_or_pause(provider, history, tools, system_prompt, model_key=model_key,
+        history.keep_latest_images(browser_tools.KEEP_SCREENSHOTS)
+        current_tools = tools + browser.tools() if browser is not None else tools
+        provider, response = generate_or_pause(provider, history, current_tools, system_prompt, model_key=model_key,
                                                task_id=task_id, event_sink=event_sink,
                                                injection_queue=injection_queue if keep_alive else None)
 
@@ -286,6 +307,10 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             result = run_tool_call(tc, mode=mode, approver=approver, model_key=model_key,
                                    todo_manager=todo_manager, mem=mem, extra_handlers=extra_handlers,
                                    event_sink=event_sink, task_id=task_id, verbose=verbose, claims=claims)
+            images = []
+            if isinstance(result, ToolOutput):
+                images = result.images if sees else []
+                result = result.text + (f"\n[{len(images)} screenshot attached]" if images else "")
 
             if verbose:
                 if tc.name == "todo_write":
@@ -297,7 +322,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
             if tc.name == "todo_write":
                 emit(event_sink, "todo_updated", {"task_id": task_id, "checklist": todo_manager.render()})
 
-            tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result))
+            tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result, images=images))
             executed_results.append({"name": tc.name, "content": result})
 
         if stop_when is not None and stop_when():
@@ -311,10 +336,6 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
                 print(f"\033[95m[context] Compacting after {turn_count} turns — replacing history with a summary.\033[0m")
             history.replace_with_summary(build_compact_input(task, todo_manager.render(), executed_results))
 
-    # Grants are per-run, not per-thread-lifetime: executor threads are created
-    # per batch but nothing guarantees they aren't reused, and a later run must
-    # never inherit approvals a human gave to an earlier one.
-    file_tools.clear_approved_paths()
     return final_text
 
 

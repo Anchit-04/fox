@@ -589,7 +589,7 @@ func (m *Model) pendingApproval() (state.Approval, int, bool) {
 	var first state.Approval
 	n := 0
 	for _, a := range m.store.Approvals {
-		if a.SessionID != m.active {
+		if a.SessionID != m.active || a.Handoff() {
 			continue
 		}
 		if n == 0 {
@@ -660,6 +660,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+x":
 		return m.endSession()
+	case "ctrl+g":
+		if h, ok := m.pendingHandoff(); ok {
+			return m.decide(approval.DecisionMsg{Approval: h})
+		}
 	case "pgup":
 		m.transcript.PageUp()
 		return nil
@@ -986,9 +990,34 @@ func (m *Model) endSession() tea.Cmd {
 	return m.send.SendCmd(protocol.EndSession{SessionID: sess.ID})
 }
 
+func (m Model) pendingHandoff() (state.Approval, bool) {
+	for _, a := range m.store.Approvals {
+		if a.SessionID == m.active && a.Handoff() {
+			return a, true
+		}
+	}
+	return state.Approval{}, false
+}
+
+func (m Model) handoffLine(h state.Approval) string {
+	th := m.theme
+	who := ""
+	if h.TaskID != "" {
+		who = " (exec " + h.TaskID + ")"
+	}
+	return th.Warn.Bold(true).Render("◆ waiting for you in the browser"+who+":") + " " +
+		th.Text.Render(h.Description) + th.Muted.Render("  ·  ctrl+g skip")
+}
+
 func (m Model) statusLine() string {
 	sess := m.store.Session(m.active)
-	if sess == nil || m.draft != nil || m.activeTask != "" {
+	if sess == nil || m.draft != nil {
+		return ""
+	}
+	if h, ok := m.pendingHandoff(); ok {
+		return m.handoffLine(h)
+	}
+	if m.activeTask != "" {
 		return ""
 	}
 	since, ok := m.working[sess.ID]

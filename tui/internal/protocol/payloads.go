@@ -58,7 +58,10 @@ type ApprovalRequestedPayload struct {
 	Args        map[string]any `json:"args"`
 	Reason      string         `json:"reason"`
 	Description string         `json:"description"`
+	Kind        string         `json:"kind,omitempty"`
 }
+
+func (p ApprovalRequestedPayload) Handoff() bool { return p.Kind == "handoff" }
 
 type TodoUpdatedPayload struct {
 	Checklist string `json:"checklist"`

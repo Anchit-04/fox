@@ -9,6 +9,9 @@ fox.db-shm
 # One stderr log per worker process, written by the hub.
 logs/
 
+# Fox's own browser profiles: cookies and logins from browsing sessions.
+/browser/
+
 # The build plan is kept local only — not published to the remote.
 PLAN.md
 

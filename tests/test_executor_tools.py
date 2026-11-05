@@ -171,13 +171,13 @@ class RunAgentHooks(unittest.TestCase):
 
     def test_default_tools_unchanged(self):
         fake, text = self.run_with([ProviderResponse(text="hi", tool_calls=[])])
-        self.assertEqual(fake.seen_tools, [[t["name"] for t in agent.ALL_TOOLS]])
+        self.assertEqual(fake.seen_tools, [[t["name"] for t in agent.ALL_TOOLS] + ["browser_open"]])
         self.assertEqual(text, "hi")
 
     def test_custom_tools_reach_the_model(self):
         fake, _ = self.run_with([ProviderResponse(text="ok", tool_calls=[])],
                                 tools=[REPORT_TOOL])
-        self.assertEqual(fake.seen_tools, [["report"]])
+        self.assertEqual(fake.seen_tools, [["report", "browser_open"]])
 
     def test_report_ends_the_run(self):
         c = ReportCollector()

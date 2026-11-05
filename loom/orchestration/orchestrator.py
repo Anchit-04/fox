@@ -16,9 +16,9 @@ from orchestration.claims import FileClaims
 from orchestration.dispatch import Finished, TaskInbox, start_task
 from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
 from orchestration.tasks import Lane, Task, TaskRegistry
-from providers import ToolResult, Turn, get_provider
+from providers import ToolOutput, ToolResult, Turn, get_provider, has_vision
 from sandbox.sandbox_client import SHELL_NOTE
-from tools import file_tools
+from tools import browser_tools, file_tools
 from tools.todo_tool import TodoManager
 
 SYSTEM_PROMPT = """You are the orchestrator. You can read and edit files and run commands yourself, and you can hand tasks to executor agents.
@@ -36,6 +36,7 @@ How work runs:
 - Hand off independent pieces first, then do your own part, so the executors work while you do.
 - Call wait_for_tasks when you have nothing else to do until a result arrives.
 - "read" tasks only investigate and cannot modify anything.
+- You and every executor can open web pages in Fox's browser. Use it yourself when the user wants to see or use a page; delegate browsing that is research, as a read task.
 - "write" tasks may modify files. A write task claims the files in its scope while it runs: nobody else, including you, can write them until it finishes. Write tasks on different files run at the same time.
 - You cannot finish while tasks are still running.
 
@@ -157,6 +158,7 @@ class _Run:
     inbox: TaskInbox = field(default_factory=TaskInbox)
     running: dict[str, Task] = field(default_factory=dict)
     notes_seen: int = 0
+    browser: "browser_tools.BrowserSession | None" = None
 
 
 def _system_prompt(run: _Run) -> str:
@@ -166,6 +168,7 @@ def _system_prompt(run: _Run) -> str:
             "\nThis session is read-only: you and every task can only read. If the job needs changes, "
             "say what you would change and ask the user to switch the session to a writable mode.\n"
         )
+    parts.append(browser_tools.prompt_note(run.model_key))
     parts.append("\n## Executor specialties\n" + preferences.render_for_prompt())
     return "".join(parts)
 
@@ -178,9 +181,11 @@ def _new_notes(run: _Run) -> str:
     return "[memory] New notes in shared memory (memory_read shows one in full):\n" + "\n".join(notes)
 
 
-def _run_own(tc, run: _Run) -> str:
+def _run_own(tc, run: _Run) -> "str | ToolOutput":
+    handlers = run.browser.handlers() if run.browser is not None else None
     result = run_tool_call(tc, mode=run.mode, approver=run.approver, model_key=run.model_key,
-                           todo_manager=run.todo, mem=run.mem, event_sink=run.event_sink, claims=run.claims)
+                           todo_manager=run.todo, mem=run.mem, event_sink=run.event_sink, claims=run.claims,
+                           extra_handlers=handlers)
     if tc.name == "todo_write":
         emit(run.event_sink, "todo_updated", {"task_id": None, "checklist": run.todo.render()})
     return result
@@ -218,6 +223,7 @@ def _wait(run: _Run) -> str:
 
 def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
     results: dict[str, str] = {}
+    images: dict[str, list] = {}
     for tc in calls:
         emit(run.event_sink, "tool_call", {"task_id": None, "name": tc.name, "args": tc.args})
         if tc.raw and tc.raw.get("args_parse_error"):
@@ -227,9 +233,14 @@ def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
         elif tc.name == "wait_for_tasks":
             results[tc.id] = _wait(run)
         else:
-            results[tc.id] = _run_own(tc, run)
+            result = _run_own(tc, run)
+            if isinstance(result, ToolOutput):
+                images[tc.id] = result.images if has_vision(run.model_key) else []
+                result = result.text + (f"\n[{len(images[tc.id])} screenshot attached]" if images[tc.id] else "")
+            results[tc.id] = result
         emit(run.event_sink, "tool_result", {"task_id": None, "name": tc.name, "content": results[tc.id]})
-    return [ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id]) for tc in calls]
+    return [ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id], images=images.get(tc.id, []))
+            for tc in calls]
 
 
 def _wait_for_everything(run: _Run) -> None:
@@ -247,6 +258,7 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
     run = _Run(model_key=model_key, mode=mode, mem=mem or memory.default_memory(),
                registry=TaskRegistry(), todo=TodoManager(), event_sink=event_sink,
                injection_queue=injection_queue, approver=approver or DenyApprover(), notes_seen=notes_seen)
+    run.browser = browser_tools.BrowserSession(model_key, mode=mode, approver=run.approver, event_sink=event_sink)
     tools = orchestrator_tools(mode)
     file_tools.clear_approved_paths()
 
@@ -261,8 +273,9 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
             arrived = (_finished_text(run, run.inbox.drain()), _new_notes(run))
             _deliver(history, run, "\n\n".join(text for text in arrived if text))
 
-            provider, response = generate_or_pause(provider, history, tools, system_prompt, model_key=model_key,
-                                                   task_id=None, event_sink=event_sink,
+            history.keep_latest_images(browser_tools.KEEP_SCREENSHOTS)
+            provider, response = generate_or_pause(provider, history, tools + run.browser.tools(), system_prompt,
+                                                   model_key=model_key, task_id=None, event_sink=event_sink,
                                                    injection_queue=injection_queue)
 
             if response.text:
@@ -300,6 +313,7 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
                 history.replace_with_summary(f"{summary}\n\nEvery task so far:\n{_ledger(run.registry)}")
     finally:
         _wait_for_everything(run)
+        run.browser.close()
         file_tools.clear_approved_paths()
     return final_text
 

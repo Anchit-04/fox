@@ -23,6 +23,8 @@ silent grant.
 import itertools
 import threading
 
+HANDOFF_ENDED = "ended"
+
 
 class Approver:
     """Interface. approve() is called only for ASK decisions — ALLOW and DENY
@@ -33,6 +35,15 @@ class Approver:
 
     def remember(self, tool_name: str) -> None:
         """Called after an 'always' answer. Default: no memory."""
+
+    def start_handoff(self, *, kind: str, message: str, url: str = "", task_id: str | None = None) -> str | None:
+        return None
+
+    def handoff_answer(self, request_id: str) -> bool | str | None:
+        return HANDOFF_ENDED
+
+    def finish_handoff(self, request_id: str) -> None:
+        pass
 
 
 class DenyApprover(Approver):
@@ -71,6 +82,30 @@ class CLIApprover(Approver):
             return True
         return answer == "y"
 
+    def start_handoff(self, *, kind: str, message: str, url: str = "", task_id: str | None = None) -> str | None:
+        answers = self.__dict__.setdefault("_handoff_answers", {})
+        request_id = f"handoff_{len(answers) + 1}"
+        answers[request_id] = None
+        print(f"\n\033[93m[fox needs you]\033[0m {message}")
+        print("Do it in the browser window and click Done there, or type s and Enter here to skip.")
+
+        def read() -> None:
+            try:
+                line = input()
+            except EOFError:
+                return
+            if answers.get(request_id) is None and line.strip().lower() == "s":
+                answers[request_id] = False
+
+        threading.Thread(target=read, daemon=True).start()
+        return request_id
+
+    def handoff_answer(self, request_id: str) -> bool | str | None:
+        return self.__dict__.get("_handoff_answers", {}).get(request_id)
+
+    def finish_handoff(self, request_id: str) -> None:
+        self.__dict__.get("_handoff_answers", {}).pop(request_id, None)
+
 
 class ApprovalGate(Approver):
     """Server-side approver. approve() blocks the agent's worker thread and
@@ -88,6 +123,7 @@ class ApprovalGate(Approver):
         self._condition = threading.Condition()
         self._answers: dict[str, bool] = {}
         self._always: set[str] = set()
+        self._handoffs: set[str] = set()
         self._closed = False
         self._ids = itertools.count(1)
         self._emit = emit  # callable(event_type, payload) — the session's sink
@@ -115,10 +151,39 @@ class ApprovalGate(Approver):
             # A closed session denies whatever was still in flight.
             return self._answers.pop(request_id, False)
 
+    def start_handoff(self, *, kind: str, message: str, url: str = "", task_id: str | None = None) -> str | None:
+        with self._condition:
+            if self._closed:
+                return None
+            request_id = f"handoff_{next(self._ids)}"
+            self._handoffs.add(request_id)
+        if self._emit is not None:
+            self._emit("approval_requested", {
+                "request_id": request_id,
+                "kind": "handoff",
+                "tool_name": "browser_ask_human",
+                "args": {"url": url, "need": kind},
+                "reason": "",
+                "description": message,
+                "task_id": task_id,
+            })
+        return request_id
+
+    def handoff_answer(self, request_id: str) -> bool | str | None:
+        with self._condition:
+            if request_id in self._answers:
+                return self._answers.pop(request_id)
+            return HANDOFF_ENDED if self._closed else None
+
+    def finish_handoff(self, request_id: str) -> None:
+        with self._condition:
+            self._handoffs.discard(request_id)
+            self._answers.pop(request_id, None)
+
     def respond(self, request_id: str, approved: bool, always: bool = False,
                 tool_name: str | None = None) -> None:
         with self._condition:
-            if always and approved and tool_name:
+            if always and approved and tool_name and request_id not in self._handoffs:
                 self._always.add(tool_name)
             self._answers[request_id] = approved
             self._condition.notify_all()

@@ -4,6 +4,7 @@ neutral Turn/ToolCall types (base.py) and Gemini's Content/Part/
 FunctionDeclaration shapes.
 """
 
+import base64
 import re
 import time
 
@@ -27,7 +28,7 @@ class GeminiProvider(Provider):
         contents = _to_gemini_contents(history)
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
-            tools=[_build_gemini_tool(tools)],
+            tools=[_build_gemini_tool(tools)] if tools else None,
             # We orchestrate the tool-call loop ourselves — turn off the SDK's
             # automatic function calling so it doesn't try to execute anything.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -136,7 +137,13 @@ def _to_gemini_contents(history: list) -> list:
                 types.Part.from_function_response(name=tr.name, response={"result": tr.content})
                 for tr in turn.tool_results
             ]
+            parts += [_image_part(image) for tr in turn.tool_results for image in tr.images]
             contents.append(types.Content(role="user", parts=parts))
         else:
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=turn.text or "")]))
+            parts = [types.Part.from_text(text=turn.text or "")] + [_image_part(image) for image in turn.images]
+            contents.append(types.Content(role="user", parts=parts))
     return contents
+
+
+def _image_part(image) -> "types.Part":
+    return types.Part.from_bytes(data=base64.b64decode(image.data), mime_type=image.media_type)

@@ -1,6 +1,8 @@
 from events import EventSink, emit
 from providers import Turn
 
+IMAGE_DROPPED = "\n[An older screenshot was removed here to save context.]"
+
 
 class History:
     def __init__(self, task: str):
@@ -16,3 +18,15 @@ class History:
 
     def replace_with_summary(self, text: str) -> None:
         self.turns = [Turn(role="user", text=text)]
+
+    def keep_latest_images(self, keep: int) -> None:
+        kept = 0
+        for turn in reversed(self.turns):
+            for result in reversed(turn.tool_results):
+                if not result.images:
+                    continue
+                if kept < keep:
+                    kept += 1
+                else:
+                    result.images = []
+                    result.content += IMAGE_DROPPED
