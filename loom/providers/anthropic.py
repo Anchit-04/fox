@@ -35,13 +35,14 @@ class AnthropicProvider(Provider):
             {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
             for t in tools
         ]
+        extra = {"tools": anthropic_tools} if anthropic_tools else {}
         response = self._create_with_retry(
             model=self.model_id,
             max_tokens=MAX_TOKENS,
             system=[{"type": "text", "text": system_prompt, "cache_control": CACHE}],
             messages=messages,
-            tools=anthropic_tools,
             cache_control=CACHE,
+            **extra,
         )
         if response.stop_reason == "refusal":
             category = response.stop_details.category if response.stop_details else None
@@ -86,13 +87,7 @@ def _to_anthropic_messages(history: list) -> list:
     messages = []
     for turn in history:
         if turn.role == "user" and turn.tool_results:
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": tr.call_id, "content": tr.content}
-                    for tr in turn.tool_results
-                ],
-            })
+            messages.append({"role": "user", "content": [_tool_result_block(tr) for tr in turn.tool_results]})
         elif turn.role == "assistant" and turn.raw is not None:
             messages.append({"role": "assistant", "content": turn.raw})
         elif turn.role == "assistant":
@@ -102,6 +97,20 @@ def _to_anthropic_messages(history: list) -> list:
             for tc in turn.tool_calls:
                 content.append({"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.args})
             messages.append({"role": "assistant", "content": content})
+        elif turn.images:
+            content = [{"type": "text", "text": turn.text or ""}] + [_image_block(i) for i in turn.images]
+            messages.append({"role": "user", "content": content})
         else:
             messages.append({"role": "user", "content": turn.text or ""})
     return messages
+
+
+def _image_block(image) -> dict:
+    return {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}}
+
+
+def _tool_result_block(tr) -> dict:
+    content = tr.content
+    if tr.images:
+        content = [{"type": "text", "text": tr.content}] + [_image_block(i) for i in tr.images]
+    return {"type": "tool_result", "tool_use_id": tr.call_id, "content": content}

@@ -20,11 +20,24 @@ class ToolCall:
     raw: dict | None = None  # opaque provider-private state (e.g. Gemini's thought_signature) — only that adapter reads it back
 
 
+@dataclass(frozen=True)
+class Image:
+    media_type: str
+    data: str
+
+
+@dataclass
+class ToolOutput:
+    text: str
+    images: list[Image] = field(default_factory=list)
+
+
 @dataclass
 class ToolResult:
     call_id: str      # must match the ToolCall.id it answers
     name: str
     content: str
+    images: list[Image] = field(default_factory=list)
 
 
 @dataclass
@@ -35,6 +48,7 @@ class Turn:
     tool_calls: list[ToolCall] = field(default_factory=list)     # assistant turn requesting tools
     tool_results: list[ToolResult] = field(default_factory=list)  # user turn carrying results back
     raw: list | None = None
+    images: list[Image] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

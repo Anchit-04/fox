@@ -35,7 +35,8 @@ class OpenAICompatibleProvider(Provider):
             }
             for t in tools
         ]
-        response = self._create_with_retry(model=self.model_id, messages=messages, tools=oai_tools)
+        extra = {"tools": oai_tools} if oai_tools else {}
+        response = self._create_with_retry(model=self.model_id, messages=messages, **extra)
 
         if not response.choices:
             error = getattr(response, "error", None) or "no choices in the response"
@@ -104,6 +105,11 @@ def _to_openai_messages(history: list) -> list:
         if turn.role == "user" and turn.tool_results:
             for tr in turn.tool_results:
                 messages.append({"role": "tool", "tool_call_id": tr.call_id, "content": tr.content})
+            shown = [(tr.name, image) for tr in turn.tool_results for image in tr.images]
+            if shown:
+                names = ", ".join(dict.fromkeys(name for name, _ in shown))
+                messages.append({"role": "user", "content": [{"type": "text", "text": f"Images returned by {names}:"}]
+                                 + [_image_part(image) for _, image in shown]})
         elif turn.role == "assistant":
             msg = {"role": "assistant", "content": turn.text}
             if turn.tool_calls:
@@ -116,6 +122,13 @@ def _to_openai_messages(history: list) -> list:
                     for tc in turn.tool_calls
                 ]
             messages.append(msg)
+        elif turn.images:
+            messages.append({"role": "user", "content": [{"type": "text", "text": turn.text or ""}]
+                             + [_image_part(image) for image in turn.images]})
         else:
             messages.append({"role": "user", "content": turn.text or ""})
     return messages
+
+
+def _image_part(image) -> dict:
+    return {"type": "image_url", "image_url": {"url": f"data:{image.media_type};base64,{image.data}"}}
