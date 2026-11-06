@@ -21,7 +21,11 @@ const (
 	Idle
 	Done
 	Failed
+	Interrupted
+	Paused
 )
+
+func (s Status) Stopped() bool { return s == Interrupted || s == Paused }
 
 type EntryKind int
 
@@ -74,8 +78,10 @@ type Session struct {
 	InputTokens    int
 	OutputTokens   int
 	SharedMemory   bool
+	Archived       bool
 	Unread         bool
 	Loaded         bool
+	started        bool
 	lastSeq        int
 }
 
@@ -104,7 +110,24 @@ type Store struct {
 	Models           []protocol.VaultEntry
 	Notices          []string
 	DefaultWorkspace string
+	ShowArchived     bool
 	pending          []PendingStart
+}
+
+func (s *Store) Remove(ids ...string) {
+	gone := map[string]bool{}
+	for _, id := range ids {
+		gone[id] = true
+		delete(s.Sessions, id)
+	}
+	order := s.Order[:0]
+	for _, id := range s.Order {
+		if !gone[id] {
+			order = append(order, id)
+		}
+	}
+	s.Order = order
+	s.removeApprovals(func(a Approval) bool { return gone[a.SessionID] })
 }
 
 func New() *Store {
@@ -156,7 +179,7 @@ func (s *Store) Projects() []Project {
 	index := map[string]int{}
 	for _, id := range s.Order {
 		sess := s.Sessions[id]
-		if sess.ParentID != "" {
+		if sess.ParentID != "" || (sess.Archived && !s.ShowArchived) {
 			continue
 		}
 		key := workspaceKey(sess.Workspace)
