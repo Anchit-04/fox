@@ -163,6 +163,15 @@ type SessionSummary struct {
 	ModelKey       *string `json:"model_key"`
 	Status         string  `json:"status"`
 	SharedMemory   bool    `json:"shared_memory"`
+	Archived       bool    `json:"archived"`
+}
+
+type RemovedPayload struct {
+	SessionIDs []string `json:"session_ids"`
+	Reason     string   `json:"reason"`
+	Archived   bool     `json:"archived"`
+	Count      int      `json:"count"`
+	Project    string   `json:"project"`
 }
 
 type SessionsPayload struct {
