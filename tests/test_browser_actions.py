@@ -74,6 +74,7 @@ PAGES = {
 <div style="height:3000px"></div>
 <p>Bottom of the page</p>""",
     "/two": "<!doctype html><title>Two</title><h1>Second page</h1>",
+    "/heavy": "<!doctype html><title>Heavy</title><h1>Charts</h1><img src='/slow.png' alt='chart'>",
     "/login": "<!doctype html><title>Sign in</title><div style='height:1500px'>Welcome back</div>"
               "<form action=/two><label>Email <input name=email></label>"
               "<label>Password <input type=password name=pw></label><button>Sign in</button></form>",
@@ -84,6 +85,11 @@ PAGES = {
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/slow.png"):
+            time.sleep(8)
+            self.send_response(404)
+            self.end_headers()
+            return
         body = PAGES.get(self.path.split("?")[0])
         self.send_response(200 if body else 404)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -292,6 +298,23 @@ class LiveActions(unittest.TestCase):
         self.assertIn("Page: Two", self.actions.forward().text)
         with self.assertRaises(ActionError):
             self.actions.forward()
+
+    def test_a_page_that_keeps_loading_still_opens(self):
+        started = time.monotonic()
+        with mock.patch("browser.actions.SETTLE_TIMEOUT", 1.0), mock.patch("browser.cdp.LOAD_GRACE_SECONDS", 0.5):
+            result = self.actions.navigate(self.base + "/heavy")
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertIn("Page: Heavy", result.text)
+        self.assertIn("Charts", result.text)
+        self.assertIn("still loading", result.text)
+
+    def test_a_busy_page_is_not_mistaken_for_a_closed_one(self):
+        self.page.post("Runtime.evaluate", {"expression": "setTimeout(() => { const t = Date.now(); "
+                                                          "while (Date.now() - t < 6000) {} }, 0)"})
+        time.sleep(0.3)
+        started = time.monotonic()
+        self.assertTrue(self.page.exists())
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_only_web_and_project_urls_open(self):
         with self.assertRaises(ActionError):
