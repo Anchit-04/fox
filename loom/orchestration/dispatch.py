@@ -1,6 +1,8 @@
 import threading
 from dataclasses import asdict,dataclass
 from agent import ALL_TOOLS,run_agent
+from history import History
+from providers import Turn
 from events import emit
 from config import routing
 from orchestration.claims import FileClaims
@@ -54,11 +56,12 @@ def _memory_text(task: Task)->str:
     f"blockers: {';'.join(r.blockers) or 'none'}"
   )
 
-def _execute(task:Task,admission:Admission,model_key:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox)->None:
+def _execute(task:Task,admission:Admission,model_key:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox,journal=None,history=None)->None:
   collector = ReportCollector()
   audit = ScopeAudit(task,event_sink)
   error = None
-  _set_status(task,TaskStatus.RUNNING,event_sink,model_key=model_key)
+  if history is None:
+    _set_status(task,TaskStatus.RUNNING,event_sink,model_key=model_key)
   try:
     run_agent(
       task.description+REPORT_INSTRUCTIONS,
@@ -75,6 +78,8 @@ def _execute(task:Task,admission:Admission,model_key:str,claims:FileClaims,*,mem
       extra_handlers= {**collector.handlers(),"ask_orchestrator":proposals.handler_for(task.id)},
       stop_when = lambda: collector.done,
       claims = claims,
+      recorder = journal.recorder(task.id) if journal is not None and history is None else None,
+      history = history,
     )
   except Exception as e:
     error = f"executor crashed: {type(e).__name__};{e}"
@@ -85,7 +90,7 @@ def _execute(task:Task,admission:Admission,model_key:str,claims:FileClaims,*,mem
     _set_status(task,TaskStatus.FAILED,event_sink,error=error or "ended without calling report")
 
 
-def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox)->None:
+def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox,journal=None)->None:
   model_key= "none"
   try:
     admission = admit(task,session_mode)
@@ -93,10 +98,43 @@ def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,inje
   except(PolicyRefusal,routing.RoutingError) as e:
     _set_status(task,TaskStatus.FAILED,event_sink,error = str(e))
   else:
-    _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals)
+    _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal)
   mem.append_entry(task.id,model_key,_memory_text(task),scope =task.scope,kind="task_result",task_id=task.id)
 
-def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,event_sink=None,injection_queue=None,approver=None)->list[str]:
+def continue_task(task:Task,message:str,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,journal,event_sink=None,injection_queue=None,approver=None)->list[str]:
+  if task.lane is Lane.WRITE:
+    taken = claims.claim(task.id,task.scope)
+    if taken:
+      return taken
+  turns = journal.turns(task.id)
+  task.reopen()
+  emit(event_sink,"task_reopened",{"task_id":task.id,"run":task.run})
+  history = History(turns=turns,recorder=journal.recorder(task.id))
+  history.add(Turn(role="user",text=message))
+  proposals = ProposalBox(event_sink)
+
+  def run()->None:
+    model_key = "none"
+    try:
+      admission = admit(task,session_mode)
+      model_key = routing.pick_executor(preferred=task.model_key)
+      _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal,history=history)
+    except (PolicyRefusal,routing.RoutingError) as e:
+      _set_status(task,TaskStatus.FAILED,event_sink,error=str(e))
+    finally:
+      if not task.is_terminal:
+        _set_status(task,TaskStatus.FAILED,event_sink,error="executor thread ended without a final state")
+      claims.release(task.id)
+      try:
+        mem.append_entry(f"{task.id}-run{task.run}",model_key,_memory_text(task),scope=task.scope,kind="task_result",task_id=task.id)
+      finally:
+        inbox.put(Finished(task,tuple(p.text for p in proposals.drain())))
+
+  threading.Thread(target=run,daemon=True,name=f"executor-{task.id}-run{task.run}").start()
+  return []
+
+
+def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,event_sink=None,injection_queue=None,approver=None,journal=None)->list[str]:
   emit(event_sink,"task_created",{"task_id":task.id,"description":task.description,"lane":task.lane.value,"scope":task.scope})
   if task.lane is Lane.WRITE:
     taken = claims.claim(task.id,task.scope)
@@ -107,7 +145,7 @@ def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,me
 
   def run()->None:
     try:
-      _run_one(task,session_mode,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals)
+      _run_one(task,session_mode,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal)
     finally:
       if not task.is_terminal:
         _set_status(task,TaskStatus.FAILED,event_sink,error="executor thread ended without a final state")
