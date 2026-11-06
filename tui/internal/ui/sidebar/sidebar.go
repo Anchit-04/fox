@@ -26,6 +26,23 @@ type NewProjectMsg struct{}
 
 type OpenVaultMsg struct{}
 
+type DeleteMsg struct {
+	SessionID string
+	Label     string
+}
+
+type ArchiveMsg struct {
+	SessionID string
+	Archived  bool
+}
+
+type CleanMsg struct {
+	Workspace string
+	Name      string
+}
+
+type ToggleArchivedMsg struct{}
+
 type PopoutMsg struct {
 	Label      string
 	SessionIDs []string
@@ -186,9 +203,22 @@ func (m *Model) Key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.newChat()
 	case "p":
 		return emit(NewProjectMsg{})
+	case "A", "shift+a":
+		return emit(ToggleArchivedMsg{})
 	}
 	if len(m.rows) == 0 {
 		return nil
+	}
+	if r := m.rows[m.cursor]; r.kind == sessionRow {
+		switch msg.String() {
+		case "d":
+			return emit(DeleteMsg{SessionID: r.session.ID, Label: Title(r.session)})
+		case "a":
+			return emit(ArchiveMsg{SessionID: r.session.ID, Archived: !r.session.Archived})
+		}
+	}
+	if r := m.rows[m.cursor]; r.kind == projectRow && msg.String() == "c" {
+		return emit(CleanMsg{Workspace: r.project.Path, Name: r.project.Name})
 	}
 	switch msg.String() {
 	case "up", "k":
@@ -444,12 +474,19 @@ func statusIcon(th *theme.Theme, st state.Status) (string, lipgloss.Style) {
 		return "○", th.Text
 	case state.Done:
 		return "✓", th.Muted
+	case state.Interrupted:
+		return "◌", th.Muted
+	case state.Paused:
+		return "‖", th.Muted
 	default:
 		return "✗", th.Warn
 	}
 }
 
 func statusWord(th *theme.Theme, sess *state.Session) (string, lipgloss.Style) {
+	if sess.Archived {
+		return "archived", th.Muted
+	}
 	switch sess.Status {
 	case state.NeedsYou:
 		return "needs you", th.Warn
@@ -460,6 +497,10 @@ func statusWord(th *theme.Theme, sess *state.Session) (string, lipgloss.Style) {
 		return "idle", th.Muted
 	case state.Failed:
 		return "failed", th.Warn
+	case state.Interrupted:
+		return "interrupted", th.Muted
+	case state.Paused:
+		return "paused", th.Muted
 	case state.Working:
 		return "", th.Muted
 	}
