@@ -24,6 +24,24 @@ def _session_ended(db: sqlite3.Connection, session_id: str, seq: int, ts: str, p
     )
 
 
+def _session_resumed(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
+    columns, values = ["status = 'running'", "final_text = NULL", "ended_at = NULL"], []
+    if payload.get("model_key"):
+        columns.append("model_key = ?")
+        values.append(payload["model_key"])
+    db.execute(f"UPDATE sessions SET {', '.join(columns)} WHERE id = ?", (*values, session_id))
+
+
+def _session_archived(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
+    db.execute("UPDATE sessions SET archived_at = ? WHERE id = ?",
+               (ts if payload.get("archived", True) else None, session_id))
+
+
+def _task_reopened(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
+    db.execute("UPDATE tasks SET status = 'running', run = run + 1, error = NULL, report = NULL, ended_at = NULL "
+               "WHERE session_id = ? AND task_id = ?", (session_id, payload["task_id"]))
+
+
 def _agent_turn(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
     if payload.get("task_id") is None and payload.get("model_key"):
         db.execute("UPDATE sessions SET model_key = ? WHERE id = ?", (payload["model_key"], session_id))
@@ -89,6 +107,9 @@ def _model_called(db: sqlite3.Connection, session_id: str, seq: int, ts: str, pa
 HANDLERS = {
     "session_started": _session_started,
     "session_ended": _session_ended,
+    "session_resumed": _session_resumed,
+    "task_reopened": _task_reopened,
+    "session_archived": _session_archived,
     "agent_turn": _agent_turn,
     "todo_updated": _todo_updated,
     "task_created": _task_created,
