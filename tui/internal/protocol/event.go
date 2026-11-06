@@ -5,6 +5,8 @@ import "encoding/json"
 const (
 	SessionStarted       = "session_started"
 	SessionEnded         = "session_ended"
+	SessionResumed       = "session_resumed"
+	TaskReopened         = "task_reopened"
 	AgentTurn            = "agent_turn"
 	TodoUpdated          = "todo_updated"
 	TaskCreated          = "task_created"
@@ -31,6 +33,11 @@ const (
 	Projects           = "projects"
 	Sessions           = "sessions"
 	KillSessionDone    = "kill_session_done"
+	SessionRemoved     = "session_removed"
+	DeleteSessionDone  = "delete_session_done"
+	ArchiveSessionDone = "archive_session_done"
+	CleanPreview       = "clean_sessions_preview"
+	CleanDone          = "clean_sessions_done"
 )
 
 type Event struct {
