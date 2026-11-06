@@ -10,7 +10,7 @@ from orchestration.tasks import Lane, TaskStatus
 from store import migrations
 from store.migrations import MIGRATIONS, StoreError, migrate, version
 
-TABLES = {"sessions", "events", "tasks", "memory_entries", "model_calls"}
+TABLES = {"sessions", "events", "tasks", "memory_entries", "model_calls", "blobs", "workers"}
 
 
 def fresh() -> sqlite3.Connection:
@@ -57,6 +57,17 @@ class Migrate(unittest.TestCase):
         migrate(db)
         keys = {row[0] for row in db.execute("SELECT workspace_key FROM sessions")}
         self.assertEqual(len(keys), 1 if sys.platform == "win32" else 2)
+
+    def test_existing_tasks_start_at_run_one(self):
+        db = fresh()
+        with mock.patch.object(migrations, "MIGRATIONS", MIGRATIONS[:4]):
+            migrate(db)
+        db.execute("INSERT INTO sessions (id, workspace, workspace_key, task, mode, permission_mode, started_at, "
+                   "memory_space) VALUES ('s', 'w', 'w', 't', 'agent', 'workspace-write', 'then', 's')")
+        db.execute("INSERT INTO tasks (session_id, task_id, description, lane, scope, status, created_at) "
+                   "VALUES ('s', 't1', 'd', 'read', '[]', 'done', 'then')")
+        migrate(db)
+        self.assertEqual(db.execute("SELECT task_id, run, status FROM tasks").fetchall(), [("t1", 1, "done")])
 
     def test_existing_memory_moves_into_each_sessions_own_space(self):
         db = fresh()
