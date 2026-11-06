@@ -115,3 +115,24 @@ func TestSharedChatsCarryAMark(t *testing.T) {
 func stripped(s string) string {
 	return ansi.Strip(s)
 }
+
+func TestDeleteArchiveAndCleanKeys(t *testing.T) {
+	m := model(t, store(t))
+	m.cursor = 1
+	if msg, ok := run(m.Key(key("d"))).(DeleteMsg); !ok || msg.SessionID != "a1" || msg.Label == "" {
+		t.Fatalf("d on a chat = %#v", msg)
+	}
+	if msg, ok := run(m.Key(key("a"))).(ArchiveMsg); !ok || msg.SessionID != "a1" || !msg.Archived {
+		t.Fatalf("a on a chat = %#v", msg)
+	}
+	m.cursor = 0
+	if msg, ok := run(m.Key(key("c"))).(CleanMsg); !ok || msg.Name != "shop" {
+		t.Fatalf("c on a project = %#v", msg)
+	}
+	if run(m.Key(key("d"))) != nil {
+		t.Fatal("d on a project row should do nothing")
+	}
+	if _, ok := run(m.Key(key("A"))).(ToggleArchivedMsg); !ok {
+		t.Fatal("A should toggle archived chats")
+	}
+}
