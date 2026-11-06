@@ -68,6 +68,7 @@ class Task:
     status: TaskStatus = TaskStatus.QUEUED
     report: Report | None = None
     error: str | None = None   
+    run: int = 1
 
     @property
     def is_terminal(self) -> bool:
@@ -87,6 +88,14 @@ class Task:
         if error is not None:
             self.error = error
         self.status = to
+
+    def reopen(self) -> None:
+        if not self.is_terminal:
+            raise InvalidTransition(f"task {self.id}: only a finished task can be continued, not a {self.status.value} one")
+        self.status = TaskStatus.RUNNING
+        self.report = None
+        self.error = None
+        self.run += 1
 
 
 class TaskRegistry:
@@ -117,3 +126,8 @@ class TaskRegistry:
     def all(self) -> list[Task]:
         """Every task, in creation order."""
         return list(self._tasks.values())
+
+    def restore(self, task: Task) -> None:
+        self._tasks[task.id] = task
+        highest = max(int(t[1:]) for t in self._tasks if t[1:].isdigit())
+        self._ids = itertools.count(highest + 1)
