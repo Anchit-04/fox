@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import secrets
 import sys
 import uuid
 from collections import defaultdict
@@ -10,17 +12,25 @@ import websockets
 
 import paths
 import permissions
+import transport
 from browser import launch as browser_launch
 from browser.launch import close_shared_browser
 from config import vault
-from store import Store
+from store import Store, is_project_space
 
 WORKER_SCRIPT = Path(__file__).resolve().with_name("worker.py")
 READ_LIMIT = 64 * 1024 * 1024
 READY_TIMEOUT_SECONDS = 30
 SHUTDOWN_GRACE_SECONDS = 10
+REGISTER_POLL_SECONDS = 0.05
+EXIT_POLL_SECONDS = 0.2
 LOG_TAIL_LINES = 20
 IDLE_EVENTS = {"awaiting_input", "model_error"}
+CLEARABLE = ("done", "failed", "interrupted", "paused")
+DELETED = "deleted"
+RESTARTED = "interrupted: server restarted"
+AUTO_RESUMES = 2
+AUTO_RESUME_WINDOW_SECONDS = 300
 
 
 class WorkerGone(Exception):
@@ -46,6 +56,10 @@ class WorkerHandle:
         self.workspace = workspace
         self.log_path = log_path
         self.process: asyncio.subprocess.Process | None = None
+        self.pid: int | None = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+        self.hosted: list[dict] = []
         self.sessions: set[str] = set()
         self.ended: set[str] = set()
         self.alive = False
@@ -78,9 +92,12 @@ def session_status(event_type: str, payload: dict, current: str) -> str:
 class Hub:
     def __init__(self, store: Store, *, db_path: Path, default_workspace: Path, log_dir: Path,
                  allow_unsafe: bool = False, worker_command: list[str] | None = None,
-                 browser_profile: Path | None = None):
+                 browser_profile: Path | None = None, keep_workers: bool = False):
         self.store = store
         self.browser_profile = browser_profile
+        self.keep_workers = keep_workers
+        self.closing = False
+        self.auto_resumed: dict[str, list[float]] = defaultdict(list)
         self.db_path = db_path
         self.default_workspace = default_workspace
         self.log_dir = log_dir
@@ -102,14 +119,103 @@ class Hub:
             "set_model_key": self.set_model_key,
             "list_projects": self.list_projects,
             "list_sessions": self.list_sessions,
+            "delete_session": self.delete_session,
+            "archive_session": self.archive_session,
+            "clean_sessions": self.clean_sessions,
         }
 
     def mark_interrupted(self) -> list[str]:
-        orphans = [row["session_id"] for row in self.store.sessions() if row["status"] == "running"]
+        orphans = [row["session_id"] for row in self.store.sessions()
+                   if row["status"] == "running" and self._live_worker(row["session_id"]) is None]
         for session_id in orphans:
             self.store.append_event(session_id, "session_ended", {
-                "task_id": None, "status": "failed", "final_text": "interrupted: server restarted"})
+                "task_id": None, "status": "interrupted", "final_text": RESTARTED})
         return orphans
+
+    def _info_from_row(self, row: dict) -> SessionInfo:
+        return SessionInfo(session_id=row["id"], parent_id=row["parent_id"], workspace=row["workspace"],
+                           task=row["task"], mode=row["mode"], permission_mode=row["permission_mode"],
+                           model_key=row["model_key"], shared_memory=is_project_space(row["memory_space"]),
+                           status=row["status"])
+
+    def _log_path(self, root_id: str) -> Path:
+        return self.log_dir / f"worker-{root_id}.log"
+
+    async def adopt(self) -> list[str]:
+        adopted = []
+        for row in self.store.workers():
+            if not transport.pid_alive(row["pid"]):
+                self.store.unregister_worker(row["root_id"], row["pid"])
+                continue
+            worker = WorkerHandle(row["root_id"], row["workspace"], self._log_path(row["root_id"]))
+            try:
+                await self._connect(worker, row)
+            except (OSError, RuntimeError, asyncio.TimeoutError):
+                continue
+            worker.alive = True
+            for hosted in worker.hosted:
+                stored = self.store.session(hosted["session_id"])
+                if stored is None:
+                    continue
+                info = self._info_from_row(stored)
+                info.status = "idle" if hosted.get("idle") else "running"
+                self.sessions[info.session_id] = info
+                self.workers[info.session_id] = worker
+                worker.sessions.add(info.session_id)
+                adopted.append(info.session_id)
+            worker.ready.set()
+            self._spawn_in_background(self._relay(worker))
+        return adopted
+
+    def _mid_run(self, session_id: str) -> bool:
+        rows = self.store._query("SELECT type FROM events WHERE session_id = ? AND task_id IS NULL AND type NOT IN "
+                                 "('history_turn', 'history_result', 'history_compacted', 'session_ended') "
+                                 "ORDER BY seq DESC LIMIT 1", (session_id,))
+        return bool(rows) and rows[0]["type"] not in IDLE_EVENTS
+
+    async def start(self) -> dict:
+        adopted = await self.adopt()
+        interrupted = self.mark_interrupted()
+        resumed = [s for s in interrupted if self.store.session(s)["parent_id"] is None and self._mid_run(s)]
+        for session_id in resumed:
+            await self.resume(session_id, RESTARTED)
+        if not adopted and self.browser_profile is not None:
+            await asyncio.to_thread(close_shared_browser, self.browser_profile)
+        return {"adopted": adopted, "interrupted": interrupted, "resumed": resumed}
+
+    async def resume(self, session_id: str, reason: str) -> WorkerHandle | None:
+        live = self._live_worker(session_id)
+        if live is not None:
+            return live
+        row = self.store.session(session_id)
+        if row is None or row["parent_id"] is not None:
+            return None
+        worker = WorkerHandle(session_id, row["workspace"], self._log_path(session_id))
+        info = self._info_from_row(row)
+        info.status = "running"
+        self.sessions[session_id] = info
+        self.workers[session_id] = worker
+        worker.sessions.add(session_id)
+        self._broadcast_status(session_id)
+        command = {"kind": "start_session", "session_id": session_id, "resume": True, "reason": reason,
+                   "validated": {e.model_key: e.validated for e in vault.list_models() if e.validated is not None}}
+        self._spawn_in_background(self._start_worker(worker, command))
+        return worker
+
+    async def stop_workers(self) -> list[str]:
+        stopped = []
+        for worker in {w for w in self.workers.values() if w.alive}:
+            try:
+                await asyncio.wait_for(self._to_worker(worker, {"kind": "shutdown", "reason": "paused"}), 1)
+            except (WorkerGone, asyncio.TimeoutError):
+                continue
+            stopped.extend(sorted(worker.sessions))
+        waiting = [asyncio.create_task(w.exited.wait()) for w in {w for w in self.workers.values()}]
+        if waiting:
+            await asyncio.wait(waiting, timeout=SHUTDOWN_GRACE_SECONDS)
+        if self.browser_profile is not None:
+            await asyncio.to_thread(close_shared_browser, self.browser_profile)
+        return stopped
 
     async def handler(self, ws) -> None:
         self.clients.add(ws)
@@ -207,31 +313,53 @@ class Hub:
     async def _launch(self, worker: WorkerHandle) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         extra = ["--allow-unsafe-workspace"] if self.allow_unsafe else []
+        token = secrets.token_hex(16)
+        env = {**os.environ, transport.TOKEN_ENV: token, transport.ROOT_ENV: worker.root_id}
         with open(worker.log_path, "ab") as log:
             worker.process = await asyncio.create_subprocess_exec(
                 *self.worker_command, "--workspace", worker.workspace, "--db", str(self.db_path), *extra,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log,
-                cwd=worker.workspace, limit=READ_LIMIT)
+                stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log, cwd=worker.workspace, env=env,
+                **transport.detached())
+        worker.pid = worker.process.pid
         try:
-            await asyncio.wait_for(self._wait_ready(worker), READY_TIMEOUT_SECONDS)
+            row = await asyncio.wait_for(self._wait_registered(worker, token), READY_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             raise RuntimeError(f"no ready line within {READY_TIMEOUT_SECONDS}s") from None
+        await self._connect(worker, row)
 
-    async def _wait_ready(self, worker: WorkerHandle) -> None:
+    async def _wait_registered(self, worker: WorkerHandle, token: str) -> dict:
         while True:
-            line = await worker.process.stdout.readline()
+            row = self.store.worker(worker.root_id)
+            if row is not None and row["token"] == token:
+                return row
+            if worker.process.returncode is not None:
+                raise RuntimeError(f"exited with code {worker.process.returncode}")
+            await asyncio.sleep(REGISTER_POLL_SECONDS)
+
+    async def _connect(self, worker: WorkerHandle, row: dict) -> None:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", row["port"], limit=READ_LIMIT), READY_TIMEOUT_SECONDS)
+        writer.write(transport.encode({"kind": transport.HELLO, "token": row["token"]}))
+        await writer.drain()
+        while True:
+            line = await asyncio.wait_for(reader.readline(), READY_TIMEOUT_SECONDS)
             if not line:
-                raise RuntimeError(f"exited with code {await worker.process.wait()}")
+                raise RuntimeError("the worker closed the connection during the handshake")
             try:
-                if json.loads(line).get("kind") == "ready":
-                    return
-            except (ValueError, AttributeError):
+                message = json.loads(line)
+            except ValueError:
                 continue
+            if message.get("kind") == "ready":
+                break
+        worker.reader, worker.writer = reader, writer
+        worker.pid = message.get("pid") or row["pid"]
+        worker.hosted = message.get("sessions") or []
 
     async def _start_failed(self, worker: WorkerHandle, reason: str) -> None:
         if worker.process is not None and worker.process.returncode is None:
             worker.process.kill()
             await worker.process.wait()
+        self.store.unregister_worker(worker.root_id)
         text = f"worker failed to start: {reason}\n{worker.log_tail()}".strip()
         for session_id in sorted(worker.sessions):
             self._send_to_watchers(session_id, {"type": "error", "session_id": session_id, "message": text})
@@ -242,9 +370,9 @@ class Hub:
 
     async def _write(self, worker: WorkerHandle, command: dict) -> None:
         try:
-            worker.process.stdin.write((json.dumps(command, ensure_ascii=False) + "\n").encode("utf-8"))
-            await worker.process.stdin.drain()
-        except (ConnectionError, RuntimeError, AttributeError) as e:
+            worker.writer.write(transport.encode(command))
+            await worker.writer.drain()
+        except (ConnectionError, RuntimeError, AttributeError, OSError) as e:
             raise WorkerGone(str(e)) from e
 
     async def _to_worker(self, worker: WorkerHandle, command: dict) -> None:
@@ -255,13 +383,15 @@ class Hub:
             await self._write(worker, command)
 
     async def _relay(self, worker: WorkerHandle) -> None:
-        stdout = worker.process.stdout
+        stdout = worker.reader
         while True:
             try:
                 line = await stdout.readline()
             except (ValueError, asyncio.LimitOverrunError):
                 worker.reason = "worker sent a line over the size limit"
-                worker.process.kill()
+                self._kill(worker)
+                break
+            except (ConnectionError, OSError):
                 break
             if not line:
                 break
@@ -276,15 +406,34 @@ class Hub:
                 session_id = message.get("session_id")
                 self._send_to_watchers(session_id, {"type": "error", "session_id": session_id,
                                                     "message": message.get("message")})
-        await self._worker_exited(worker, await worker.process.wait())
+        if self.closing and self.keep_workers:
+            return
+        await self._worker_exited(worker, await self._exit_code(worker))
 
-    async def _worker_exited(self, worker: WorkerHandle, code: int) -> None:
+    async def _worker_exited(self, worker: WorkerHandle, code: int | None) -> None:
         worker.alive = False
-        text = worker.reason or f"worker exited with code {code}"
-        for session_id in sorted(worker.sessions - worker.ended):
-            await self._record_failure(session_id, text)
+        text = worker.reason or ("worker exited" if code is None else f"worker exited with code {code}")
+        self.store.unregister_worker(worker.root_id, worker.pid)
+        stopped = sorted(worker.sessions - worker.ended)
+        for session_id in stopped:
+            await self._record_failure(session_id, text, status="interrupted")
         self._forget(worker)
         worker.exited.set()
+        if worker.reason in ("killed", DELETED) or self.closing:
+            return
+        for session_id in stopped:
+            info = self.sessions.get(session_id)
+            if info is not None and info.parent_id is None and self._mid_run(session_id) and                     self._may_auto_resume(session_id):
+                await self.resume(session_id, text)
+
+    def _may_auto_resume(self, session_id: str) -> bool:
+        now = asyncio.get_running_loop().time()
+        recent = [t for t in self.auto_resumed[session_id] if now - t < AUTO_RESUME_WINDOW_SECONDS]
+        if len(recent) >= AUTO_RESUMES:
+            self.auto_resumed[session_id] = recent
+            return False
+        self.auto_resumed[session_id] = recent + [now]
+        return True
 
     def _forget(self, worker: WorkerHandle) -> None:
         worker.alive = False
@@ -292,14 +441,14 @@ class Hub:
             if self.workers.get(session_id) is worker:
                 del self.workers[session_id]
 
-    async def _record_failure(self, session_id: str, text: str) -> None:
+    async def _record_failure(self, session_id: str, text: str, status: str = "failed") -> None:
         info = self.sessions[session_id]
         if self.store.session(session_id) is None:
             await self._emit(session_id, "session_started", {
                 "task": info.task, "workspace": info.workspace, "mode": info.mode,
                 "permission_mode": info.permission_mode, "model_key": info.model_key, "parent_id": info.parent_id,
                 "memory_space": None})
-        await self._emit(session_id, "session_ended", {"task_id": None, "status": "failed", "final_text": text})
+        await self._emit(session_id, "session_ended", {"task_id": None, "status": status, "final_text": text})
 
     async def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
         seq = self.store.append_event(session_id, event_type, payload)
@@ -357,6 +506,8 @@ class Hub:
         await _reply(ws, {"type": "attached", "session_id": session_id, "state": state})
 
     async def human_message(self, ws, msg: dict) -> None:
+        if self._live_worker(msg.get("session_id")) is None:
+            await self.resume(msg.get("session_id"), "your message")
         command = {"kind": "human_message", "task_id": msg.get("task_id"), "content": msg["content"]}
         if await self._forward(ws, msg, command):
             await _reply(ws, {"type": "human_message_queued", "session_id": msg["session_id"],
@@ -378,9 +529,9 @@ class Hub:
             await _reply(ws, {"type": "error", "message": f"unknown session_id {session_id!r}"})
             return
         await worker.ready.wait()
-        if worker.process is not None and worker.process.returncode is None:
+        if worker.alive:
             worker.reason = "killed"
-            worker.process.kill()
+            self._kill(worker)
         await worker.exited.wait()
         await _reply(ws, {"type": "kill_session_done", "session_id": session_id})
 
@@ -410,8 +561,78 @@ class Hub:
         await _reply(ws, {"type": "projects", "current": str(self.default_workspace),
                           "projects": self.store.projects(msg.get("limit"))})
 
+    async def delete_session(self, ws, msg: dict) -> None:
+        session_id = msg.get("session_id")
+        row = self.store.session(session_id) if session_id else None
+        if row is None:
+            await _reply(ws, {"type": "error", "message": f"unknown session_id {session_id!r}"})
+            return
+        worker = self._live_worker(session_id)
+        if worker is not None and row["parent_id"] is not None:
+            await _reply(ws, {"type": "error", "message": "this side chat is still running; end it with ctrl+x first"})
+            return
+        if worker is not None:
+            worker.reason = DELETED
+            self._kill(worker)
+            await worker.exited.wait()
+        removed = await self._remove(session_id)
+        await _reply(ws, {"type": "delete_session_done", "session_id": session_id, "session_ids": removed})
+
+    async def _remove(self, session_id: str) -> list[str]:
+        removed = await asyncio.to_thread(self.store.delete_session, session_id)
+        for gone in removed:
+            self.sessions.pop(gone, None)
+            self.workers.pop(gone, None)
+            self.subscribers.pop(gone, None)
+            log = self._log_path(gone)
+            try:
+                log.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if removed:
+            websockets.broadcast(self.clients, json.dumps({"type": "session_removed", "session_ids": removed,
+                                                           "reason": DELETED}))
+        return removed
+
+    async def archive_session(self, ws, msg: dict) -> None:
+        session_id = msg.get("session_id")
+        row = self.store.session(session_id) if session_id else None
+        if row is None:
+            await _reply(ws, {"type": "error", "message": f"unknown session_id {session_id!r}"})
+            return
+        if self._live_worker(session_id) is not None:
+            await _reply(ws, {"type": "error", "message": "this chat is still running; it can be archived once it stops"})
+            return
+        archived = msg.get("archived", True) is not False
+        ids = self.store.family(session_id)
+        for current in ids:
+            self.store.append_event(current, "session_archived", {"task_id": None, "archived": archived})
+        if archived:
+            websockets.broadcast(self.clients, json.dumps({"type": "session_removed", "session_ids": ids,
+                                                           "reason": "archived"}))
+        await _reply(ws, {"type": "archive_session_done", "session_id": session_id, "archived": archived,
+                          "session_ids": ids})
+
+    async def clean_sessions(self, ws, msg: dict) -> None:
+        rows = [row for row in self.store.sessions(msg.get("project"), include_archived=True)
+                if row["parent_id"] is None and row["status"] in CLEARABLE
+                and self._live_worker(row["session_id"]) is None]
+        ids = [row["session_id"] for row in rows]
+        if msg.get("dry_run"):
+            await _reply(ws, {"type": "clean_sessions_preview", "project": msg.get("project"), "count": len(ids),
+                              "session_ids": ids})
+            return
+        removed = []
+        for session_id in ids:
+            removed += await self._remove(session_id)
+        if removed:
+            await asyncio.to_thread(self.store.vacuum)
+        await _reply(ws, {"type": "clean_sessions_done", "project": msg.get("project"), "count": len(ids),
+                          "session_ids": removed})
+
     async def list_sessions(self, ws, msg: dict) -> None:
-        rows = self.store.sessions(msg.get("project"), msg.get("limit"))
+        rows = self.store.sessions(msg.get("project"), msg.get("limit"),
+                                   include_archived=bool(msg.get("include_archived")))
         for row in rows:
             row["live"] = self._live_worker(row["session_id"]) is not None
             info = self.sessions.get(row["session_id"])
@@ -419,7 +640,31 @@ class Hub:
                 row["status"] = info.status
         await _reply(ws, {"type": "sessions", "sessions": rows})
 
+    def _kill(self, worker: WorkerHandle) -> None:
+        if worker.process is not None and worker.process.returncode is None:
+            worker.process.kill()
+        else:
+            transport.terminate(worker.pid)
+
+    async def _exit_code(self, worker: WorkerHandle) -> int | None:
+        if worker.process is not None:
+            return await worker.process.wait()
+        deadline = asyncio.get_running_loop().time() + SHUTDOWN_GRACE_SECONDS
+        while transport.pid_alive(worker.pid) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(EXIT_POLL_SECONDS)
+        if transport.pid_alive(worker.pid):
+            transport.terminate(worker.pid)
+        return None
+
     async def shutdown(self) -> None:
+        self.closing = True
+        if self.keep_workers:
+            for worker in {w for w in self.workers.values() if w.alive}:
+                if worker.writer is not None:
+                    worker.writer.close()
+                worker.alive = False
+                worker.exited.set()
+            return
         workers = {w for w in self.workers.values() if w.alive}
         for worker in workers:
             try:
@@ -430,9 +675,9 @@ class Hub:
         if waiting:
             await asyncio.wait(waiting, timeout=SHUTDOWN_GRACE_SECONDS)
         for worker in workers:
-            if not worker.exited.is_set() and worker.process.returncode is None:
+            if not worker.exited.is_set() and (worker.process is None or worker.process.returncode is None):
                 worker.reason = "interrupted: server stopped"
-                worker.process.kill()
+                self._kill(worker)
         if waiting:
             await asyncio.wait(waiting, timeout=5)
         if self.browser_profile is not None:
@@ -453,6 +698,11 @@ def _validate_all_keys() -> None:
 
 
 async def serve(hub: Hub, host: str, port: int) -> None:
+    started = await hub.start()
+    if started["adopted"]:
+        print(f"reconnected to {len(started['adopted'])} running session(s)")
+    if started["resumed"]:
+        print(f"resuming {len(started['resumed'])} interrupted session(s)")
     async with websockets.serve(hub.handler, host, port):
         print(f"server.py listening on ws://{host}:{port}")
         try:
@@ -471,6 +721,8 @@ if __name__ == "__main__":
                         help="Permit a drive root or your home directory as a workspace.")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--stop", action="store_true",
+                        help="Pause every running session and close Fox's browser, then exit.")
     args = parser.parse_args()
 
     try:
@@ -482,15 +734,19 @@ if __name__ == "__main__":
     hub_store = Store.open(paths.db_path())
     hub = Hub(hub_store, db_path=paths.db_path(), default_workspace=default_workspace,
               log_dir=paths.FOX_HOME / "logs", allow_unsafe=args.allow_unsafe_workspace,
-              browser_profile=browser_launch.profile_dir())
-    interrupted = hub.mark_interrupted()
+              browser_profile=browser_launch.profile_dir(), keep_workers=True)
+    if args.stop:
+        async def stop_everything() -> list[str]:
+            await hub.adopt()
+            return await hub.stop_workers()
+
+        print(f"paused {len(asyncio.run(stop_everything()))} session(s)")
+        raise SystemExit(0)
     # Printed prominently because it's inferred from cwd when not passed, and
     # launching from the wrong directory is otherwise invisible until the agent
     # writes somewhere surprising.
     print(f"default workspace: {default_workspace}")
     print(f"fox home:          {paths.FOX_HOME}")
-    if interrupted:
-        print(f"marked {len(interrupted)} interrupted session(s) from the last run")
     try:
         asyncio.run(serve(hub, args.host, args.port))
     except KeyboardInterrupt:
