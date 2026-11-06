@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -69,7 +70,8 @@ class WorkerProcess(unittest.TestCase):
         first = self.until("awaiting_input")
         self.assertEqual([e["type"] for e in first], ["session_started", "model_called", "agent_turn",
                                                        "awaiting_input"])
-        self.assertEqual([e["seq"] for e in first], [1, 2, 3, 4])
+        seqs = [e["seq"] for e in first]
+        self.assertEqual(seqs, sorted(set(seqs)))
         self.assertEqual(first[0]["workspace"], str(self.folder.resolve()))
         self.assertEqual(first[2]["text"], "reply 1: what is this?")
 
@@ -87,6 +89,43 @@ class WorkerProcess(unittest.TestCase):
             stored = [e["type"] for e in store.events("s1")]
             self.assertEqual(store.session("s1")["status"], "done")
         self.assertEqual(stored[-1], "session_ended")
+        self.assertIn("history_turn", stored)
+        self.assertNotIn("history_turn", [e["type"] for e in first + second])
+
+    def test_a_killed_worker_is_resumed_by_a_new_one(self):
+        self.start()
+        self.until("awaiting_input")
+        self.proc.kill()
+        self.proc.wait(10)
+        self.proc.stdout.close()
+        self.proc.stdin.close()
+        env = {**os.environ, "SCRIPT_SHOWS_HISTORY": "1"}
+        self.proc = subprocess.Popen([sys.executable, str(SCRIPTED), "--workspace", str(self.folder), "--db",
+                                      str(self.db)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=self.log, cwd=self.folder, env=env)
+        self.read()
+        self.send(kind="start_session", session_id="s1", resume=True, reason="worker gone")
+        waiting = self.until("awaiting_input")
+        self.assertEqual([e["type"] for e in waiting], ["session_resumed", "awaiting_input"])
+        self.send(kind="human_message", session_id="s1", task_id=None, content="and now?")
+        reply = [e for e in self.until("awaiting_input") if e["type"] == "agent_turn"][-1]
+        self.assertEqual(reply["text"], "saw 4 turns, last: [Message from human]: and now?")
+        with Store.open(self.db) as store:
+            self.assertEqual(store.session("s1")["status"], "running")
+            texts = [t["payload"]["turn"].get("text", "") for t in store.history_events("s1")
+                     if t["type"] == "history_turn"]
+        self.assertEqual(texts[:2], ["what is this?", "reply 1: what is this?"])
+        self.assertTrue(texts[2].startswith("[Fox resumed this chat]"))
+
+    def test_resuming_a_chat_with_no_history_says_so(self):
+        with Store.open(self.db) as store:
+            store.append_event("old", "session_started", {
+                "task": "t", "workspace": str(self.folder), "mode": "agent", "permission_mode": "workspace-write",
+                "model_key": None, "parent_id": None})
+        self.send(kind="start_session", session_id="old", resume=True)
+        ended = self.until("session_ended")[-1]
+        self.assertEqual(ended["status"], "failed")
+        self.assertIn("no stored history", ended["final_text"])
 
     def test_prints_from_agent_code_never_reach_the_protocol(self):
         self.start()
@@ -106,7 +145,7 @@ class WorkerProcess(unittest.TestCase):
         self.until("awaiting_input")
         self.proc.stdin.close()
         ended = self.until("session_ended")[-1]
-        self.assertEqual((ended["status"], ended["final_text"]), ("failed", "interrupted: server stopped"))
+        self.assertEqual((ended["status"], ended["final_text"]), ("interrupted", "interrupted: server stopped"))
         self.assertEqual(self.proc.wait(10), 0)
 
     def test_unknown_sessions_and_bad_lines_get_errors_not_crashes(self):
