@@ -187,3 +187,163 @@ func TestOrdinaryApprovalsStillUseTheBox(t *testing.T) {
 		t.Fatal("an ordinary approval is not a handoff")
 	}
 }
+
+func humanMessages(r *recorder) []protocol.HumanMessage {
+	var out []protocol.HumanMessage
+	for _, c := range r.sent {
+		if h, ok := c.(protocol.HumanMessage); ok {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func TestAMessageToAnInterruptedChatIsSentSoItCanResume(t *testing.T) {
+	m, r := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop"}`)
+	event(t, m, `{"type":"session_ended","session_id":"s1","seq":9,"status":"interrupted","final_text":"interrupted: server restarted"}`)
+	m.active = "s1"
+	if !strings.Contains(m.placeholder(), "pick this chat up again") {
+		t.Fatalf("placeholder = %q", m.placeholder())
+	}
+	m.update(composer.SubmitMsg{Text: "carry on"})
+	sent := humanMessages(r)
+	if len(sent) != 1 || sent[0].SessionID != "s1" || sent[0].Content != "carry on" {
+		t.Fatalf("sent = %+v", sent)
+	}
+}
+
+func TestAFailedChatStillRefusesMessages(t *testing.T) {
+	m, r := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop"}`)
+	event(t, m, `{"type":"session_ended","session_id":"s1","seq":9,"status":"failed","final_text":"worker failed to start"}`)
+	m.active = "s1"
+	m.update(composer.SubmitMsg{Text: "hello?"})
+	if len(humanMessages(r)) != 0 {
+		t.Fatal("a failed chat should not be messaged")
+	}
+}
+
+func TestAFinishedExecutorCanBeMessaged(t *testing.T) {
+	m, r := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop","mode":"orchestrator"}`)
+	event(t, m, `{"type":"task_created","session_id":"s1","seq":2,"task_id":"t1","description":"look","lane":"read","scope":[]}`)
+	event(t, m, `{"type":"task_status_changed","session_id":"s1","seq":3,"task_id":"t1","status":"done","report":{"outcome":"ok","changes":[],"validation":"v","blockers":[]}}`)
+	m.active, m.activeTask = "s1", "t1"
+	m.update(composer.SubmitMsg{Text: "also the empty cart"})
+	sent := humanMessages(r)
+	if len(sent) != 1 || sent[0].TaskID == nil || *sent[0].TaskID != "t1" {
+		t.Fatalf("sent = %+v", sent)
+	}
+}
+
+func sentKinds(r *recorder) []string {
+	var kinds []string
+	for _, c := range r.sent {
+		kinds = append(kinds, c.Kind())
+	}
+	return kinds
+}
+
+func TestDeletingAChatAsksTwiceThenSends(t *testing.T) {
+	m, r := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop","task":"old chat"}`)
+	m.update(sidebar.DeleteMsg{SessionID: "s1", Label: "old chat"})
+	if !strings.Contains(m.flash, "press d again") {
+		t.Fatalf("flash = %q", m.flash)
+	}
+	for _, k := range sentKinds(r) {
+		if k == "delete_session" {
+			t.Fatal("deleted without asking")
+		}
+	}
+	m.update(sidebar.DeleteMsg{SessionID: "s1", Label: "old chat"})
+	last := r.sent[len(r.sent)-1]
+	if d, ok := last.(protocol.DeleteSession); !ok || d.SessionID != "s1" {
+		t.Fatalf("last sent = %+v", last)
+	}
+}
+
+func TestARemovedChatLeavesTheSidebarAndTheView(t *testing.T) {
+	m, _ := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop"}`)
+	m.active = "s1"
+	event(t, m, `{"type":"session_removed","session_ids":["s1"],"reason":"deleted"}`)
+	if m.store.Session("s1") != nil || m.active != "" {
+		t.Fatalf("session still there, active %q", m.active)
+	}
+	if len(m.store.Projects()) != 0 {
+		t.Fatal("the empty project should be gone too")
+	}
+}
+
+func TestCleaningAProjectPreviewsTheCountFirst(t *testing.T) {
+	m, r := newApp(t)
+	m.update(sidebar.CleanMsg{Workspace: "/w/shop", Name: "shop"})
+	first := r.sent[len(r.sent)-1].(protocol.CleanSessions)
+	if !first.DryRun || first.Project != "/w/shop" {
+		t.Fatalf("first clean = %+v", first)
+	}
+	event(t, m, `{"type":"clean_sessions_preview","project":"/w/shop","count":18,"session_ids":[]}`)
+	if !strings.Contains(m.flash, "delete 18 stopped chats") {
+		t.Fatalf("flash = %q", m.flash)
+	}
+	m.update(sidebar.CleanMsg{Workspace: "/w/shop", Name: "shop"})
+	second := r.sent[len(r.sent)-1].(protocol.CleanSessions)
+	if second.DryRun {
+		t.Fatal("the second c should really delete")
+	}
+}
+
+func TestArchivedChatsHideUntilShown(t *testing.T) {
+	m, r := newApp(t)
+	event(t, m, `{"type":"sessions","sessions":[{"session_id":"s1","workspace":"/w/shop","task":"t","status":"done","archived":true},{"session_id":"s2","workspace":"/w/shop","task":"t","status":"done"}]}`)
+	if got := len(m.store.Projects()[0].Sessions); got != 1 {
+		t.Fatalf("visible sessions = %d", got)
+	}
+	m.update(sidebar.ToggleArchivedMsg{})
+	if got := len(m.store.Projects()[0].Sessions); got != 2 {
+		t.Fatalf("with archived shown = %d", got)
+	}
+	if l, ok := r.sent[len(r.sent)-1].(protocol.ListSessions); !ok || !l.IncludeArchived {
+		t.Fatalf("last sent = %+v", r.sent[len(r.sent)-1])
+	}
+}
+
+func userEntries(sess *state.Session) []string {
+	var texts []string
+	for _, e := range sess.Entries {
+		if e.Kind == state.UserEntry {
+			texts = append(texts, e.Text)
+		}
+	}
+	return texts
+}
+
+func TestTheFirstMessageOfANewChatShowsOnce(t *testing.T) {
+	m, _ := newApp(t)
+	m.update(composer.SubmitMsg{Text: "Hi"})
+	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/shop","shared_memory":false}`)
+	event(t, m, `{"type":"session_started","session_id":"s1","seq":1,"task":"Hi","workspace":"/w/shop","mode":"agent","permission_mode":"workspace-write"}`)
+	if got := userEntries(m.store.Session("s1")); len(got) != 1 || got[0] != "Hi" {
+		t.Fatalf("user entries = %q", got)
+	}
+}
+
+func TestReplyMessagesNeverCreateGhostChats(t *testing.T) {
+	m, _ := newApp(t)
+	event(t, m, `{"type":"session_started","session_id":"s1","seq":1,"task":"old","workspace":"/w/shop"}`)
+	event(t, m, `{"type":"session_removed","session_ids":["s1"],"reason":"deleted"}`)
+	for _, frame := range []string{
+		`{"type":"delete_session_done","session_id":"s1","session_ids":["s1"]}`,
+		`{"type":"kill_session_done","session_id":"s1"}`,
+		`{"type":"human_message_queued","session_id":"s1","task_id":null}`,
+		`{"type":"end_session_queued","session_id":"s1"}`,
+		`{"type":"clean_sessions_done","project":"/w/shop","count":1,"session_ids":["s1"]}`,
+	} {
+		event(t, m, frame)
+	}
+	if m.store.Session("s1") != nil || len(m.store.Projects()) != 0 {
+		t.Fatalf("a ghost chat appeared: %+v", m.store.Projects())
+	}
+}
