@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 import memory
 import permissions
-from agent import ALL_TOOLS, IDENTITY, run_tool_call
+from agent import ALL_TOOLS, IDENTITY, restore_todos, run_tool_call
 from events import emit
 from approval import DenyApprover
 from calls import generate_or_pause
@@ -13,9 +13,9 @@ from context import MAX_ITERATIONS, build_compact_input
 from history import History
 from injection import InjectionQueue
 from orchestration.claims import FileClaims
-from orchestration.dispatch import Finished, TaskInbox, start_task
+from orchestration.dispatch import Finished, TaskInbox, continue_task, start_task
 from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
-from orchestration.tasks import Lane, Task, TaskRegistry
+from orchestration.tasks import Lane, Task, TaskRegistry, UnknownTask
 from providers import ToolOutput, ToolResult, Turn, get_provider, has_vision
 from sandbox.sandbox_client import SHELL_NOTE
 from tools import browser_tools, file_tools
@@ -86,6 +86,21 @@ def delegate_tool(session_mode: str) -> dict:
     }
 
 
+CONTINUE_TOOL = {
+    "type": "function",
+    "name": "continue_task",
+    "description": ("Send a finished task's executor a follow-up, for example a missed case. It carries on with "
+                    "everything it already read, under the same task id, and its new result arrives as a message."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "The finished task, for example t3."},
+            "message": {"type": "string", "description": "What it should do next."},
+        },
+        "required": ["task_id", "message"],
+    },
+}
+
 WAIT_TOOL = {
     "type": "function",
     "name": "wait_for_tasks",
@@ -98,7 +113,7 @@ WAIT_SECONDS = 600
 
 def orchestrator_tools(session_mode: str) -> list[dict]:
     own = [t for t in ALL_TOOLS if session_mode != permissions.READ_ONLY or t["name"] in READ_LANE_TOOLS]
-    return [delegate_tool(session_mode), WAIT_TOOL] + own
+    return [delegate_tool(session_mode), CONTINUE_TOOL, WAIT_TOOL] + own
 
 
 def _create_task(registry: TaskRegistry, args: dict) -> Task:
@@ -159,6 +174,7 @@ class _Run:
     running: dict[str, Task] = field(default_factory=dict)
     notes_seen: int = 0
     browser: "browser_tools.BrowserSession | None" = None
+    journal: object = None
 
 
 def _system_prompt(run: _Run) -> str:
@@ -198,7 +214,8 @@ def _delegate(tc, run: _Run) -> str:
         return json.dumps({"error": f"Task not created: {e}"})
     run.running[task.id] = task
     taken = start_task(task, run.mode, claims=run.claims, inbox=run.inbox, mem=run.mem,
-                       event_sink=run.event_sink, injection_queue=run.injection_queue, approver=run.approver)
+                       event_sink=run.event_sink, injection_queue=run.injection_queue, approver=run.approver,
+                       journal=run.journal)
     if taken:
         del run.running[task.id]
         return json.dumps({"error": f"{task.id} not started: {', '.join(taken)} already claimed by a running "
@@ -209,7 +226,40 @@ def _delegate(tc, run: _Run) -> str:
 def _finished_text(run: _Run, finished: list[Finished]) -> str:
     for f in finished:
         run.running.pop(f.task.id, None)
-    return "\n".join(f"[task finished] {_summarize(f.task, f.proposals)}" for f in finished)
+    return "\n".join(f"[task finished] {_summarize(f.task, f.proposals)}{_run_label(f.task)}" for f in finished)
+
+
+def _run_label(task: Task) -> str:
+    return f" (run {task.run})" if task.run > 1 else ""
+
+
+def reopen(run: _Run, task_id: str, message: str) -> str | None:
+    if run.journal is None:
+        return "this chat has no stored histories, so its tasks cannot be continued"
+    try:
+        task = run.registry.get(task_id)
+    except UnknownTask:
+        return f"there is no task {task_id}"
+    if not task.is_terminal:
+        return f"{task_id} is still running; your message was queued for it instead"
+    taken = continue_task(task, message, run.mode, claims=run.claims, inbox=run.inbox, mem=run.mem,
+                          journal=run.journal, event_sink=run.event_sink, injection_queue=run.injection_queue,
+                          approver=run.approver)
+    if taken:
+        return f"{task_id} cannot continue: {', '.join(taken)} is claimed by a running task"
+    run.running[task.id] = task
+    return None
+
+
+def _continue(tc, run: _Run) -> str:
+    task_id = str(tc.args.get("task_id") or "")
+    message = str(tc.args.get("message") or "").strip()
+    if not message:
+        return json.dumps({"error": "message must say what the executor should do next"})
+    refused = reopen(run, task_id, f"[Message from the orchestrator]: {message}")
+    if refused:
+        return json.dumps({"error": refused})
+    return f"{task_id} continues (run {run.registry.get(task_id).run}). Its result will arrive as a message."
 
 
 def _wait(run: _Run) -> str:
@@ -221,7 +271,7 @@ def _wait(run: _Run) -> str:
     return _finished_text(run, finished)
 
 
-def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
+def _run_turn(calls: list, run: _Run, history: History) -> list[ToolResult]:
     results: dict[str, str] = {}
     images: dict[str, list] = {}
     for tc in calls:
@@ -232,6 +282,8 @@ def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
             results[tc.id] = _delegate(tc, run)
         elif tc.name == "wait_for_tasks":
             results[tc.id] = _wait(run)
+        elif tc.name == "continue_task":
+            results[tc.id] = _continue(tc, run)
         else:
             result = _run_own(tc, run)
             if isinstance(result, ToolOutput):
@@ -239,8 +291,9 @@ def _run_turn(calls: list, run: _Run) -> list[ToolResult]:
                 result = result.text + (f"\n[{len(images[tc.id])} screenshot attached]" if images[tc.id] else "")
             results[tc.id] = result
         emit(run.event_sink, "tool_result", {"task_id": None, "name": tc.name, "content": results[tc.id]})
-    return [ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id], images=images.get(tc.id, []))
-            for tc in calls]
+        history.add_result(ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id],
+                                      images=images.get(tc.id, [])))
+    return [ToolResult(call_id=tc.id, name=tc.name, content=results[tc.id]) for tc in calls]
 
 
 def _wait_for_everything(run: _Run) -> None:
@@ -250,23 +303,36 @@ def _wait_for_everything(run: _Run) -> None:
 
 def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Memory | None = None,
                      event_sink=None, injection_queue: InjectionQueue | None = None, approver=None,
-                     mode: str = permissions.WORKSPACE_WRITE, notes_seen: int = 0) -> str:
+                     mode: str = permissions.WORKSPACE_WRITE, notes_seen: int = 0, journal=None,
+                     history: History | None = None, registry: TaskRegistry | None = None,
+                     wait_first: bool = False, on_reopen=None) -> str:
     if mode not in permissions.MODES:
         raise ValueError(f"unknown session mode {mode!r}; expected one of {permissions.MODES}")
     model_key = model_key or routing.pick_orchestrator()
     provider = get_provider(model_key)
     run = _Run(model_key=model_key, mode=mode, mem=mem or memory.default_memory(),
-               registry=TaskRegistry(), todo=TodoManager(), event_sink=event_sink,
-               injection_queue=injection_queue, approver=approver or DenyApprover(), notes_seen=notes_seen)
+               registry=registry or TaskRegistry(), todo=TodoManager(), event_sink=event_sink,
+               injection_queue=injection_queue, approver=approver or DenyApprover(), notes_seen=notes_seen,
+               journal=journal)
     run.browser = browser_tools.BrowserSession(model_key, mode=mode, approver=run.approver, event_sink=event_sink)
     tools = orchestrator_tools(mode)
     file_tools.clear_approved_paths()
 
-    history = History(task)
+    history = history or History(task, journal.recorder(None) if journal else None, notes_seen=notes_seen)
+    restore_todos(run.todo, history.turns)
+    run.browser.offer_all = browser_tools.used_browser(history.turns)
+    if on_reopen is not None:
+        on_reopen(lambda task_id, message: reopen(run, task_id, f"[Message from human]: {message}"))
     system_prompt = _system_prompt(run)
     final_text = ""
     turns = 0
     try:
+        if wait_first and injection_queue is not None:
+            emit(event_sink, "awaiting_input", {"task_id": None})
+            messages = injection_queue.wait_for_message(None)
+            if messages is None:
+                return final_text
+            history.add_human_messages(messages, None, event_sink)
         while True:
             if injection_queue is not None:
                 history.add_human_messages(injection_queue.drain(None), None, event_sink)
@@ -304,9 +370,8 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
                 break
 
             history.add(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
-            results = _run_turn(response.tool_calls, run)
+            results = _run_turn(response.tool_calls, run, history)
 
-            history.add(Turn(role="user", tool_results=results))
             if context.should_compact(history.turns):
                 summary = build_compact_input(task, run.todo.render(),
                                               [{"name": r.name, "content": r.content} for r in results])
@@ -321,5 +386,5 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
 def _deliver(history: History, run: _Run, text: str) -> None:
     if not text:
         return
-    history.add(Turn(role="user", text=text))
+    history.add(Turn(role="user", text=text), notes_seen=run.notes_seen)
     emit(run.event_sink, "task_results_delivered", {"task_id": None, "content": text})
