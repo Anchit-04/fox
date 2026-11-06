@@ -16,20 +16,34 @@ import agent
 import memory
 import paths
 import permissions
+import resume
+import transport
 from approval import ApprovalGate
+from history import History
+from providers import Turn
 from config import routing, vault
 from injection import InjectionQueue
 from orchestration.orchestrator import run_orchestrator
-from store import Store
+from store import Store, is_project_space
+from store.history_log import Journal
 from tools import browser_tools
 
 SHUTDOWN_GRACE_SECONDS = 10
 INTERRUPTED = "interrupted: server stopped"
+PAUSED = "paused: stopped by you"
+IDLE_PAUSE = "paused: idle"
+REOPEN_WAIT_SECONDS = 5
+IDLE_SECONDS = float(os.environ.get("FOX_WORKER_IDLE_SECONDS", 30 * 60))
+WATCH_SECONDS = min(15.0, IDLE_SECONDS / 2)
 
 _write_lock = threading.Lock()
+_channel: "transport.WorkerChannel | None" = None
 
 
 def send(message: dict) -> None:
+    if _channel is not None:
+        _channel.send(message)
+        return
     line = json.dumps(message, ensure_ascii=False, default=str)
     with _write_lock:
         try:
@@ -49,8 +63,13 @@ class Session:
         self.thread: threading.Thread | None = None
         self.ended = threading.Event()
         self.stop_reason: str | None = None
+        self.idle_since: float | None = None
+        self.reopen = None
+        self.journal = Journal(store, session_id)
 
     def handle_event(self, event_type: str, payload: dict) -> None:
+        if payload.get("task_id") is None:
+            self.idle_since = time.monotonic() if event_type == "awaiting_input" else None
         seq = self.store.append_event(self.session_id, event_type, payload)
         send({"kind": "event", "event": {"session_id": self.session_id, "seq": seq, "type": event_type, **payload}})
 
@@ -84,8 +103,13 @@ def side_conversation_task(store: Store, question: str, parent: Session) -> str:
 
 
 def run_session(session: Session, task: str, model_key: str | None, mode: str, permission_mode: str,
-                notes_seen: int = 0) -> None:
+                notes_seen: int = 0, resumed: "resume.Resumed | None" = None) -> None:
     status = "done"
+    history = registry = None
+    if resumed is not None:
+        history = History(turns=resumed.turns, recorder=session.journal.recorder(None))
+        history.add(Turn(role="user", text=resumed.note))
+        registry = resume.restore_registry(session.store, session.session_id) if mode == "orchestrator" else None
     try:
         if mode == "orchestrator":
             final = run_orchestrator(
@@ -93,6 +117,9 @@ def run_session(session: Session, task: str, model_key: str | None, mode: str, p
                 event_sink=session.handle_event, mem=session.mem,
                 injection_queue=session.injection_queue,
                 approver=session.approval_gate, mode=permission_mode, notes_seen=notes_seen,
+                journal=session.journal, history=history, registry=registry,
+                wait_first=bool(resumed and resumed.waiting),
+                on_reopen=lambda reopen: setattr(session, "reopen", reopen),
             )
         else:
             final = agent.run_agent(
@@ -100,11 +127,14 @@ def run_session(session: Session, task: str, model_key: str | None, mode: str, p
                 task_id=None, event_sink=session.handle_event, mem=session.mem,
                 injection_queue=session.injection_queue, keep_alive=True,
                 approver=session.approval_gate, mode=permission_mode,
+                recorder=session.journal.recorder(None), history=history,
+                wait_first=bool(resumed and resumed.waiting),
             )
     except Exception as e:
         status, final = "failed", str(e)
     if session.stop_reason:
-        status, final = "failed", session.stop_reason
+        status = "paused" if session.stop_reason.startswith("paused") else "interrupted"
+        final = session.stop_reason
     session.approval_gate.close()
     session.handle_event("session_ended", {"task_id": None, "status": status, "final_text": final})
     session.ended.set()
@@ -122,15 +152,45 @@ class Worker:
             "approval_response": self.approval_response,
             "end_session": self.end_session,
             "reload_keys": lambda command: vault.reload(),
-            "shutdown": lambda command: self.finished.set(),
+            "shutdown": self.shutdown,
         }
+        self.stop_reason = INTERRUPTED
 
     def live(self, session_id: str | None) -> Session | None:
         with self.lock:
             session = self.sessions.get(session_id)
         return session if session is not None and not session.ended.is_set() else None
 
+    def resume_session(self, command: dict) -> None:
+        session_id = command["session_id"]
+        row = self.store.session(session_id)
+        if row is None or row["parent_id"] is not None:
+            send({"kind": "error", "session_id": session_id, "message": f"cannot resume {session_id!r}"})
+            return
+        vault.remember(command.get("validated") or {})
+        session = Session(self.store, session_id)
+        session.mem = memory.Memory.for_chat(self.store, session_id, row["workspace"],
+                                             is_project_space(row["memory_space"]))
+        resumed = resume.prepare(self.store, session_id, session.journal, session.handle_event)
+        if resumed is None:
+            session.handle_event("session_ended", {"task_id": None, "status": "failed",
+                                                   "final_text": "nothing to resume: this chat has no stored history"})
+            return
+        model_key = command.get("model_key") or row["model_key"]
+        with self.lock:
+            self.sessions[session_id] = session
+        session.handle_event("session_resumed", {"task_id": None, "reason": command.get("reason") or "resumed",
+                                                 "model_key": model_key})
+        notes_seen = session.journal.meta("notes_seen", None, 0)
+        session.thread = threading.Thread(target=self._run, daemon=True,
+                                          args=(session, row["task"], model_key, row["mode"],
+                                                row["permission_mode"], notes_seen, resumed))
+        session.thread.start()
+
     def start_session(self, command: dict) -> None:
+        if command.get("resume"):
+            self.resume_session(command)
+            return
         session_id, parent_id = command["session_id"], command.get("parent_session_id")
         parent = self.live(parent_id) if parent_id else None
         if parent_id and parent is None:
@@ -169,7 +229,22 @@ class Worker:
             send({"kind": "error", "session_id": command.get("session_id"),
                   "message": f"unknown session_id {command.get('session_id')!r}"})
             return
-        session.injection_queue.push(command.get("task_id"), command["content"])
+        task_id = command.get("task_id")
+        if task_id is not None and self._finished(session, task_id):
+            deadline = time.monotonic() + REOPEN_WAIT_SECONDS
+            while session.reopen is None and time.monotonic() < deadline and not session.ended.is_set():
+                time.sleep(0.05)
+        if task_id is not None and session.reopen is not None and self._finished(session, task_id):
+            refused = session.reopen(task_id, command["content"])
+            if refused:
+                send({"kind": "error", "session_id": session.session_id, "message": refused})
+            return
+        session.injection_queue.push(task_id, command["content"])
+
+    def _finished(self, session: Session, task_id: str) -> bool:
+        rows = self.store._query("SELECT status FROM tasks WHERE session_id = ? AND task_id = ?",
+                                 (session.session_id, task_id))
+        return bool(rows) and rows[0]["status"] in ("done", "failed", "cancelled", "escalated")
 
     def approval_response(self, command: dict) -> None:
         session = self.live(command.get("session_id"))
@@ -194,6 +269,26 @@ class Worker:
         except Exception as e:
             send({"kind": "error", "session_id": command.get("session_id"), "message": f"{command['kind']} failed: {e}"})
 
+    def shutdown(self, command: dict) -> None:
+        if command.get("reason") == "paused":
+            self.stop_reason = PAUSED
+        self.finished.set()
+
+    def hosted(self) -> list[dict]:
+        with self.lock:
+            sessions = list(self.sessions.values())
+        return [{"session_id": s.session_id, "idle": s.idle_since is not None}
+                for s in sessions if not s.ended.is_set()]
+
+    def watch_idle(self) -> None:
+        while not self.finished.wait(WATCH_SECONDS):
+            with self.lock:
+                live = [s for s in self.sessions.values() if not s.ended.is_set()]
+            now = time.monotonic()
+            if live and all(s.idle_since is not None and now - s.idle_since >= IDLE_SECONDS for s in live):
+                self.stop_reason = IDLE_PAUSE
+                self.finished.set()
+
     def read_commands(self, stream) -> None:
         for raw in stream:
             line = raw.decode("utf-8", errors="replace")
@@ -206,7 +301,7 @@ class Worker:
             sessions = list(self.sessions.values())
         for session in sessions:
             if not session.ended.is_set():
-                session.stop_reason = INTERRUPTED
+                session.stop_reason = self.stop_reason
                 session.end()
         deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS
         for session in sessions:
@@ -222,12 +317,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     paths.set_workspace(args.workspace, allow_unsafe=args.allow_unsafe_workspace)
     browser_tools.hub_owns_browser()
-    worker = Worker(Store.open(args.db, migrate=False))
-    threading.Thread(target=worker.read_commands, args=(_COMMANDS,), daemon=True).start()
-    send({"kind": "ready", "pid": os.getpid()})
-    worker.finished.wait()
-    worker.stop()
-    send({"kind": "exiting", "code": 0})
+    store = Store.open(args.db, migrate=False)
+    worker = Worker(store)
+    token = os.environ.get(transport.TOKEN_ENV)
+    if not token:
+        threading.Thread(target=worker.read_commands, args=(_COMMANDS,), daemon=True).start()
+        send({"kind": "ready", "pid": os.getpid()})
+        worker.finished.wait()
+        worker.stop()
+        send({"kind": "exiting", "code": 0})
+        return 0
+    return serve_socket(worker, store, token, os.environ.get(transport.ROOT_ENV) or "", args.workspace)
+
+
+def serve_socket(worker: "Worker", store: Store, token: str, root_id: str, workspace: str) -> int:
+    global _channel
+    _channel = transport.WorkerChannel(token)
+    _channel.start(worker.handle, lambda: {"kind": "ready", "pid": os.getpid(), "sessions": worker.hosted()})
+    store.register_worker(root_id, os.getpid(), _channel.port, token, workspace)
+    threading.Thread(target=worker.watch_idle, daemon=True).start()
+    try:
+        worker.finished.wait()
+        worker.stop()
+        send({"kind": "exiting", "code": 0})
+    finally:
+        store.unregister_worker(root_id, os.getpid())
+        _channel.close()
     return 0
 
 
