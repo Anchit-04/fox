@@ -115,6 +115,10 @@ BLIND_NOTE = ("- You can't see images. browser_layout_check finds layout problem
 LOOK_NOTE = "- browser_look asks a model that can see a question about the page.\n"
 
 
+def used_browser(turns) -> bool:
+    return any(call.name in NAMES for turn in turns for call in turn.tool_calls)
+
+
 def prompt_note(model_key: str) -> str:
     if has_vision(model_key):
         return BROWSER_NOTE + SEEING_NOTE
@@ -151,6 +155,7 @@ class BrowserSession:
         self.approver = approver
         self.task_id = task_id
         self.event_sink = event_sink
+        self.offer_all = False
         self.browser: launch.Browser | None = None
         self.conn: CDPConnection | None = None
         self.page: Page | None = None
@@ -161,7 +166,7 @@ class BrowserSession:
         return self.actions is not None
 
     def tools(self) -> list[dict]:
-        if not self.active:
+        if not self.active and not self.offer_all:
             return [OPEN]
         tools = [OPEN] + [t for t in PAGE_TOOLS
                           if not (t["name"] == "browser_upload" and self.mode == permissions.READ_ONLY)]
@@ -320,11 +325,7 @@ class BrowserSession:
     def _lost(self) -> bool:
         if self.page is None or self.conn is None or self.conn.closed:
             return True
-        try:
-            self.page.call("Runtime.evaluate", {"expression": "1"}, timeout=3)
-            return False
-        except CDPError:
-            return True
+        return not self.page.exists()
 
     def _drop(self) -> None:
         if self.actions is not None:
