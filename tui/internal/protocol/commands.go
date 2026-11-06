@@ -43,7 +43,23 @@ type ListModels struct {
 	Validate bool `json:"validate"`
 }
 
-type ListSessions struct{}
+type ListSessions struct {
+	IncludeArchived bool `json:"include_archived,omitempty"`
+}
+
+type DeleteSession struct {
+	SessionID string `json:"session_id"`
+}
+
+type ArchiveSession struct {
+	SessionID string `json:"session_id"`
+	Archived  bool   `json:"archived"`
+}
+
+type CleanSessions struct {
+	Project string `json:"project,omitempty"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+}
 
 type ListProjects struct{}
 
@@ -61,6 +77,9 @@ func (ListModels) Kind() string       { return "list_models" }
 func (SetModelKey) Kind() string      { return "set_model_key" }
 func (ListSessions) Kind() string     { return "list_sessions" }
 func (ListProjects) Kind() string     { return "list_projects" }
+func (DeleteSession) Kind() string    { return "delete_session" }
+func (ArchiveSession) Kind() string   { return "archive_session" }
+func (CleanSessions) Kind() string    { return "clean_sessions" }
 
 func Encode(c Command) ([]byte, error) {
 	body, err := json.Marshal(c)
