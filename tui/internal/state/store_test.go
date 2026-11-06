@@ -499,3 +499,42 @@ func TestChatsInTwoProjectsGroupSeparately(t *testing.T) {
 		t.Fatalf("shop chats = %v", got)
 	}
 }
+
+func TestAnInterruptedChatIsQuietAndCanResume(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_started","session_id":"s1","task":"fix","workspace":"/w"}`)
+	feed(t, s, `{"type":"session_ended","session_id":"s1","seq":5,"status":"interrupted","final_text":"interrupted: server restarted"}`)
+	sess := s.Session("s1")
+	if sess.Status != Interrupted || !sess.Status.Stopped() {
+		t.Fatalf("status = %v", sess.Status)
+	}
+	last := sess.Entries[len(sess.Entries)-1]
+	if last.Kind != NoticeEntry || last.Text != "interrupted: server restarted · send a message to continue" {
+		t.Fatalf("last entry = %+v", last)
+	}
+	feed(t, s, `{"type":"session_resumed","session_id":"s1","seq":6,"reason":"your message"}`)
+	if sess.Status != Working {
+		t.Fatalf("after resume status = %v", sess.Status)
+	}
+}
+
+func TestPausedIsItsOwnStatus(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_started","session_id":"s1","task":"fix","workspace":"/w"}`)
+	feed(t, s, `{"type":"session_ended","session_id":"s1","seq":5,"status":"paused","final_text":"paused: idle"}`)
+	if got := s.Session("s1").Status; got != Paused {
+		t.Fatalf("status = %v", got)
+	}
+}
+
+func TestAReopenedTaskRunsAgain(t *testing.T) {
+	s := New()
+	feed(t, s, `{"type":"session_started","session_id":"s1","task":"fix","workspace":"/w"}`)
+	feed(t, s, `{"type":"task_created","session_id":"s1","seq":2,"task_id":"t1","description":"d","lane":"read","scope":[]}`)
+	feed(t, s, `{"type":"task_status_changed","session_id":"s1","seq":3,"task_id":"t1","status":"failed","error":"boom"}`)
+	feed(t, s, `{"type":"task_reopened","session_id":"s1","seq":4,"task_id":"t1","run":2}`)
+	task := s.Session("s1").Tasks["t1"]
+	if task.Status != "running" || task.Error != "" {
+		t.Fatalf("task = %+v", task)
+	}
+}
