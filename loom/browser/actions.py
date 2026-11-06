@@ -720,7 +720,8 @@ class Actions:
                 try:
                     loaded.wait(SETTLE_TIMEOUT)
                 except CDPTimeout:
-                    self.notes.append(f"The page was still loading after {SETTLE_TIMEOUT:g}s.")
+                    self.notes.append("The page is still loading, so parts of it may be missing. "
+                                      "browser_snapshot reads it again.")
         if self.dialog:
             return
         try:
