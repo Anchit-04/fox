@@ -225,7 +225,7 @@ class OrchestratorTests(unittest.TestCase):
         model = ScriptedModel(done())
         self.run_with(model)
         names = [t["name"] for t in model.requests[0]["tools"]]
-        self.assertEqual(names, ["delegate_task", "wait_for_tasks"] + [t["name"] for t in agent.ALL_TOOLS]
+        self.assertEqual(names, ["delegate_task", "continue_task", "wait_for_tasks"] + [t["name"] for t in agent.ALL_TOOLS]
                          + ["browser_open"])
 
     def test_read_only_session_gives_the_orchestrator_read_tools_only(self):
