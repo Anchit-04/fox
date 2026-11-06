@@ -109,6 +109,9 @@ type Model struct {
 	working     map[string]time.Time
 	ticking     bool
 	confirmEnd  string
+	confirmDel  string
+	cleaning    string
+	cleanCount  int
 	sidebarW    int
 	attaching   map[string]bool
 	chat        newChat
@@ -200,6 +203,25 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.openVault()
 	case sidebar.PopoutMsg:
 		return m.popout(msg)
+	case sidebar.DeleteMsg:
+		return m.deleteChat(msg)
+	case sidebar.ArchiveMsg:
+		if msg.Archived {
+			m.flash = "archived · shift+a shows archived chats"
+		} else {
+			m.flash = "back in the sidebar"
+		}
+		return m.send.SendCmd(protocol.ArchiveSession{SessionID: msg.SessionID, Archived: msg.Archived})
+	case sidebar.CleanMsg:
+		return m.cleanProject(msg)
+	case sidebar.ToggleArchivedMsg:
+		m.store.ShowArchived = !m.store.ShowArchived
+		m.sync()
+		if m.store.ShowArchived {
+			m.flash = "showing archived chats · a on one brings it back · shift+a hides them"
+			return m.send.SendCmd(protocol.ListSessions{IncludeArchived: true})
+		}
+		m.flash = "archived chats hidden"
 	case PopoutDoneMsg:
 		m.flash = popoutResult(msg)
 	case composer.SubmitMsg:
@@ -275,6 +297,25 @@ func (m *Model) onEvent(ev protocol.Event) {
 		}
 	case protocol.Models:
 		m.vault.SetBusy(false, "")
+	case protocol.SessionRemoved:
+		if m.store.Session(m.active) == nil {
+			m.active, m.activeTask = "", ""
+		}
+	case protocol.CleanPreview:
+		if p, err := protocol.Payload[protocol.RemovedPayload](ev); err == nil && m.cleaning != "" {
+			m.cleanCount = p.Count
+			if p.Count == 0 {
+				m.flash, m.cleaning = "no stopped chats to clear here", ""
+			} else {
+				m.flash = fmt.Sprintf("press c again to delete %d stopped chat%s for good", p.Count, plural(p.Count))
+			}
+		}
+	case protocol.CleanDone:
+		if p, err := protocol.Payload[protocol.RemovedPayload](ev); err == nil {
+			m.flash = fmt.Sprintf("deleted %d chat%s", p.Count, plural(p.Count))
+		}
+	case protocol.DeleteSessionDone:
+		m.flash = "chat deleted"
 	case protocol.Error:
 		if ev.SessionID == "" && len(m.store.Notices) > 0 {
 			m.flash = m.store.Notices[len(m.store.Notices)-1]
@@ -454,7 +495,7 @@ func (m *Model) submit(text string) tea.Cmd {
 		m.flash = "still loading this session · try again in a moment"
 		return nil
 	}
-	if sess == nil || sess.Status == state.Done || sess.Status == state.Failed {
+	if sess == nil || !resumable(sess) {
 		m.composer.SetValue(text)
 		m.flash = "this session has ended · ctrl+n starts a new one"
 		return nil
@@ -466,11 +507,21 @@ func (m *Model) submit(text string) tea.Cmd {
 	return m.send.SendCmd(protocol.HumanMessage{SessionID: m.active, Content: text})
 }
 
+func resumable(sess *state.Session) bool {
+	switch {
+	case sess.Status == state.Failed:
+		return false
+	case sess.Status == state.Done || sess.Status.Stopped():
+		return sess.ParentID == ""
+	}
+	return true
+}
+
 func (m *Model) sendToTask(sess *state.Session, text string) tea.Cmd {
 	task := sess.Tasks[m.activeTask]
-	if task == nil || taskFinished(task.Status) {
+	if task == nil {
 		m.composer.SetValue(text)
-		m.flash = "this executor has finished · esc goes back to the orchestrator"
+		m.flash = "this executor is gone · esc goes back to the orchestrator"
 		return nil
 	}
 	id := task.ID
@@ -609,6 +660,12 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	if k != "ctrl+x" {
 		m.confirmEnd = ""
 	}
+	if k != "d" {
+		m.confirmDel = ""
+	}
+	if k != "c" {
+		m.cleaning, m.cleanCount = "", 0
+	}
 	if m.screen == vaultScreen {
 		return m.vault.Update(msg, m.store.Models)
 	}
@@ -682,6 +739,28 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.sidebar.Key(msg)
 	}
 	return m.composer.Update(msg)
+}
+
+func (m *Model) deleteChat(msg sidebar.DeleteMsg) tea.Cmd {
+	if m.confirmDel != msg.SessionID {
+		m.confirmDel = msg.SessionID
+		m.flash = fmt.Sprintf("press d again to delete %q for good", msg.Label)
+		return nil
+	}
+	m.confirmDel = ""
+	m.flash = "deleting…"
+	return m.send.SendCmd(protocol.DeleteSession{SessionID: msg.SessionID})
+}
+
+func (m *Model) cleanProject(msg sidebar.CleanMsg) tea.Cmd {
+	if m.cleaning == msg.Workspace && m.cleanCount > 0 {
+		m.cleaning, m.cleanCount = "", 0
+		m.flash = "clearing…"
+		return m.send.SendCmd(protocol.CleanSessions{Project: msg.Workspace})
+	}
+	m.cleaning, m.cleanCount = msg.Workspace, 0
+	m.flash = "counting stopped chats in " + msg.Name + "…"
+	return m.send.SendCmd(protocol.CleanSessions{Project: msg.Workspace, DryRun: true})
 }
 
 func (m *Model) popoutCurrent() tea.Cmd {
@@ -804,14 +883,16 @@ func (m Model) placeholder() string {
 	case m.draft != nil:
 		return "ask a side question…"
 	case m.activeTask != "" && sess != nil && sess.Tasks[m.activeTask] != nil && taskFinished(sess.Tasks[m.activeTask].Status):
-		return "this executor has finished · esc back to the orchestrator"
+		return "this executor has finished · a message starts it again with everything it knew"
 	case m.activeTask != "":
 		return "message this executor…"
 	case m.active == "" && m.askPath:
 		return "folder path, for example C:\\Users\\you\\projects\\api"
 	case m.active == "":
 		return "describe a task to start a chat…"
-	case sess != nil && (sess.Status == state.Done || sess.Status == state.Failed):
+	case sess != nil && sess.Status.Stopped():
+		return "send a message to pick this chat up again…"
+	case sess != nil && !resumable(sess):
 		return "this session has ended · ctrl+n for a new one"
 	default:
 		return "ask fox…"
@@ -823,7 +904,7 @@ func (m Model) hint() string {
 		return m.flash
 	}
 	if m.focus == focusSidebar {
-		return "↑↓ move · enter open · n new chat · p new project · ←→ fold · tab back"
+		return "↑↓ move · enter open · n new chat · d delete · a archive · c clear project · ←→ fold · tab back"
 	}
 	switch {
 	case m.draft != nil:
@@ -976,7 +1057,7 @@ func (m Model) modeLabel() string {
 
 func (m *Model) endSession() tea.Cmd {
 	sess := m.store.Session(m.active)
-	if sess == nil || sess.Status == state.Done || sess.Status == state.Failed {
+	if sess == nil || sess.Status == state.Done || sess.Status == state.Failed || sess.Status.Stopped() {
 		m.flash = "no running session to end"
 		return nil
 	}
