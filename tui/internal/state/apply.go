@@ -26,10 +26,35 @@ func (s *Store) Apply(ev protocol.Event) {
 			s.applySessions(p.Sessions)
 		}
 		return
+	case protocol.SessionRemoved:
+		if p, err := protocol.Payload[protocol.RemovedPayload](ev); err == nil {
+			if p.Reason == "archived" && s.ShowArchived {
+				for _, id := range p.SessionIDs {
+					if sess := s.Sessions[id]; sess != nil {
+						sess.Archived = true
+					}
+				}
+				return
+			}
+			s.Remove(p.SessionIDs...)
+		}
+		return
+	case protocol.ArchiveSessionDone:
+		if p, err := protocol.Payload[protocol.RemovedPayload](ev); err == nil {
+			for _, id := range p.SessionIDs {
+				if sess := s.Sessions[id]; sess != nil {
+					sess.Archived = p.Archived
+				}
+			}
+		}
+		return
 	case protocol.Projects:
 		if p, err := protocol.Payload[protocol.ProjectsPayload](ev); err == nil && p.Current != "" {
 			s.DefaultWorkspace = p.Current
 		}
+		return
+	case protocol.DeleteSessionDone, protocol.CleanPreview, protocol.CleanDone, protocol.KillSessionDone,
+		protocol.HumanMessageQueued, protocol.EndSessionQueued:
 		return
 	}
 
@@ -60,6 +85,14 @@ func (s *Store) Apply(ev protocol.Event) {
 		s.applySessionStarted(sess, ev)
 	case protocol.SessionEnded:
 		s.applySessionEnded(sess, ev)
+	case protocol.SessionResumed:
+		s.setStatus(sess, Working)
+		sess.add(Entry{Kind: NoticeEntry, Text: "resumed · picking up where it stopped"})
+	case protocol.TaskReopened:
+		if taskID != "" {
+			t := sess.task(taskID)
+			t.Status, t.Error, t.Report = "running", "", nil
+		}
 	case protocol.AgentTurn:
 		s.applyAgentTurn(sess, taskID, ev)
 	case protocol.HumanMessageInjected:
@@ -200,6 +233,7 @@ func (s *Store) summarize(p protocol.SessionSummary) {
 		sess.Model = *p.ModelKey
 	}
 	sess.SharedMemory = p.SharedMemory
+	sess.Archived = p.Archived
 	sess.Status = serverStatus(p.Status)
 }
 
@@ -213,6 +247,10 @@ func serverStatus(status string) Status {
 		return NeedsYou
 	case "failed":
 		return Failed
+	case "interrupted":
+		return Interrupted
+	case "paused":
+		return Paused
 	default:
 		return Done
 	}
@@ -253,7 +291,8 @@ func (s *Store) applySessionStarted(sess *Session, ev protocol.Event) {
 	p.Task = sideQuestion(p.Task)
 	sess.Task = p.Task
 	sess.Status = Working
-	if p.Task != "" {
+	if p.Task != "" && !sess.started {
+		sess.started = true
 		sess.add(Entry{Kind: UserEntry, Text: p.Task})
 	}
 }
@@ -261,12 +300,27 @@ func (s *Store) applySessionStarted(sess *Session, ev protocol.Event) {
 func (s *Store) applySessionEnded(sess *Session, ev protocol.Event) {
 	s.removeApprovals(func(a Approval) bool { return a.SessionID == sess.ID })
 	p, err := protocol.Payload[protocol.SessionEndedPayload](ev)
-	if err == nil && p.Status == "failed" {
-		sess.Status = Failed
-		sess.add(Entry{Kind: ErrorEntry, Text: "session failed: " + p.FinalText})
-		return
+	if err == nil {
+		switch p.Status {
+		case "failed":
+			sess.Status = Failed
+			sess.add(Entry{Kind: ErrorEntry, Text: "session failed: " + p.FinalText})
+			return
+		case "interrupted", "paused":
+			sess.Status = serverStatus(p.Status)
+			sess.add(Entry{Kind: NoticeEntry, Text: stopNote(p.FinalText)})
+			return
+		}
 	}
 	sess.Status = Done
+}
+
+func stopNote(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "stopped"
+	}
+	return reason + " · send a message to continue"
 }
 
 func (s *Store) applyAgentTurn(sess *Session, taskID string, ev protocol.Event) {
