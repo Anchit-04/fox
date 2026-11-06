@@ -200,7 +200,8 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
               mode: str = permissions.WORKSPACE_WRITE, approver=None,
               tools: list[dict] | None = None, extra_handlers: dict | None = None,
-              stop_when: Callable[[], bool] | None = None, claims=None, browse: bool = True) -> str:
+              stop_when: Callable[[], bool] | None = None, claims=None, browse: bool = True,
+              history: History | None = None, recorder=None, wait_first: bool = False) -> str:
     """mode is the sandbox axis (read-only / workspace-write / full-access);
     `approver` is the approval axis — who gets asked when policy says ASK.
     They're independent on purpose: see permissions.py.
@@ -226,30 +227,49 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     todo_manager = TodoManager()  # own instance per run — never shared, no lock needed
     mem = mem or memory.default_memory()
     tools = tools if tools is not None else ALL_TOOLS
+    history = history or History(task, recorder)
+    restore_todos(todo_manager, history.turns)
     browser = browser_tools.BrowserSession(model_key, mode=mode, approver=approver, task_id=task_id,
                                            event_sink=event_sink) if browse else None
     if browser is not None:
+        browser.offer_all = browser_tools.used_browser(history.turns)
+    if browser is not None:
         extra_handlers = {**(extra_handlers or {}), **browser.handlers()}
     try:
-        return _loop(task, verbose=verbose, model_key=model_key, provider=provider, system_prompt=system_prompt,
-                     todo_manager=todo_manager, mem=mem, tools=tools, browser=browser, task_id=task_id,
+        return _loop(task, history, verbose=verbose, model_key=model_key, provider=provider,
+                     system_prompt=system_prompt, todo_manager=todo_manager, mem=mem, tools=tools, browser=browser,
+                     task_id=task_id,
                      event_sink=event_sink, injection_queue=injection_queue, keep_alive=keep_alive, mode=mode,
-                     approver=approver, extra_handlers=extra_handlers, stop_when=stop_when, claims=claims)
+                     approver=approver, extra_handlers=extra_handlers, stop_when=stop_when, claims=claims,
+                     wait_first=wait_first)
     finally:
         if browser is not None:
             browser.close()
         file_tools.clear_approved_paths()
 
 
-def _loop(task: str, *, verbose: bool, model_key: str, provider, system_prompt: str, todo_manager: TodoManager,
-          mem: memory.Memory, tools: list[dict], browser, task_id, event_sink, injection_queue, keep_alive: bool,
-          mode: str, approver, extra_handlers, stop_when, claims) -> str:
-    # This list IS the conversation — resent in full every call.
-    history = History(task)
+def restore_todos(todo_manager: TodoManager, turns: list[Turn]) -> None:
+    for turn in reversed(turns):
+        for call in reversed(turn.tool_calls):
+            if call.name == "todo_write" and isinstance(call.args.get("todos"), list):
+                todo_manager.write(call.args["todos"])
+                return
+
+
+def _loop(task: str, history: History, *, verbose: bool, model_key: str, provider, system_prompt: str,
+          todo_manager: TodoManager, mem: memory.Memory, tools: list[dict], browser, task_id, event_sink,
+          injection_queue, keep_alive: bool, mode: str, approver, extra_handlers, stop_when, claims,
+          wait_first: bool = False) -> str:
     sees = has_vision(model_key)
 
     turn_count = 0
     final_text = ""
+    if wait_first and injection_queue is not None:
+        emit(event_sink, "awaiting_input", {"task_id": task_id})
+        messages = injection_queue.wait_for_message(task_id)
+        if messages is None:
+            return final_text
+        history.add_human_messages(messages, task_id, event_sink)
     while True:
         if injection_queue is not None:
             history.add_human_messages(injection_queue.drain(task_id), task_id, event_sink)
@@ -295,8 +315,7 @@ def _loop(task: str, *, verbose: bool, model_key: str, provider, system_prompt: 
         # Assistant turn has to land in history before its tool results do.
         history.add(Turn(role="assistant", text=response.text, tool_calls=response.tool_calls, raw=response.raw))
 
-        tool_results = []
-        executed_results = []  # kept alongside tool_results for compaction summaries
+        executed_results = []
         for tc in response.tool_calls:
             args = tc.args
 
@@ -322,13 +341,12 @@ def _loop(task: str, *, verbose: bool, model_key: str, provider, system_prompt: 
             if tc.name == "todo_write":
                 emit(event_sink, "todo_updated", {"task_id": task_id, "checklist": todo_manager.render()})
 
-            tool_results.append(ToolResult(call_id=tc.id, name=tc.name, content=result, images=images))
+            history.add_result(ToolResult(call_id=tc.id, name=tc.name, content=result, images=images))
             executed_results.append({"name": tc.name, "content": result})
 
         if stop_when is not None and stop_when():
             break
 
-        history.add(Turn(role="user", tool_results=tool_results))
         if context.should_compact(history.turns):
             # Drop the raw history, replace it with a summary — the todo list
             # already externalizes progress, so nothing essential is lost.
