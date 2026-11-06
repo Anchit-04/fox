@@ -255,6 +255,7 @@ def _raise_for_exception(result: dict) -> None:
         raise JavaScriptError(text)
 
 
+LOAD_GRACE_SECONDS = 5.0
 WINDOW_BOUNDS = {"left": 60, "top": 40, "width": 1280, "height": 860}
 
 
@@ -311,7 +312,17 @@ class Page:
     def expect(self, method: str) -> EventWaiter:
         return self.conn.expect(method, self.session_id)
 
-    def navigate(self, url: str, timeout: float = 30.0) -> None:
+    def exists(self) -> bool:
+        if self.target_id is None or self.conn.closed:
+            return False
+        try:
+            targets = self.conn.send("Target.getTargets", timeout=5)["targetInfos"]
+        except CDPError:
+            return False
+        return any(t["targetId"] == self.target_id for t in targets)
+
+    def navigate(self, url: str, timeout: float = 30.0, load_grace: float | None = None) -> bool:
+        load_grace = LOAD_GRACE_SECONDS if load_grace is None else load_grace
         deadline = time.monotonic() + timeout
         with self.expect("Page.lifecycleEvent") as lifecycle:
             result = self.call("Page.navigate", {"url": url}, timeout=timeout)
@@ -319,11 +330,17 @@ class Page:
                 raise NavigationFailed(f"Could not open {url}: {result['errorText']}")
             loader_id = result.get("loaderId")
             if not loader_id:
-                return
-            lifecycle.wait(
-                max(deadline - time.monotonic(), 0.01),
-                where=lambda event: event.get("name") == "load" and event.get("loaderId") == loader_id,
-            )
+                return True
+
+            def reached(name: str):
+                return lambda event: event.get("name") == name and event.get("loaderId") == loader_id
+
+            try:
+                lifecycle.wait(max(deadline - time.monotonic(), 0.01), where=reached("DOMContentLoaded"))
+                lifecycle.wait(max(min(load_grace, deadline - time.monotonic()), 0.01), where=reached("load"))
+            except CDPTimeout:
+                return False
+            return True
 
     def main_frame_id(self, timeout: float = 30.0) -> str:
         return self.call("Page.getFrameTree", timeout=timeout)["frameTree"]["frame"]["id"]
