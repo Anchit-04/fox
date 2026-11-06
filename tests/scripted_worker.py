@@ -18,6 +18,8 @@ class Scripted:
         self.calls += 1
         print("noise from agent code")
         os.write(1, b"raw noise on file descriptor 1\n")
+        if os.environ.get("SCRIPT_SHOWS_HISTORY"):
+            return ProviderResponse(text=f"saw {len(history)} turns, last: {history[-1].text}", tool_calls=[])
         return ProviderResponse(text=f"reply {self.calls}: {history[-1].text}", tool_calls=[])
 
 
