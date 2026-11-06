@@ -183,8 +183,8 @@ class Failures(HubCase):
         await tui.event(b, "awaiting_input")
         await tui.send(type="human_message", session_id=a, content="crash")
         ended = await tui.event(a, "session_ended")
-        self.assertEqual((ended["status"], ended["final_text"]), ("failed", "worker exited with code 3"))
-        self.assertEqual(self.store.session(a)["status"], "failed")
+        self.assertEqual((ended["status"], ended["final_text"]), ("interrupted", "worker exited with code 3"))
+        self.assertEqual(self.store.session(a)["status"], "interrupted")
         await tui.send(type="human_message", session_id=b, content="still here?")
         await tui.event(b, "agent_turn", text="echo still here?")
 
@@ -221,7 +221,7 @@ class Failures(HubCase):
             "model_key": None, "parent_id": None})
         self.assertEqual(self.hub.mark_interrupted(), ["old"])
         row = self.store.session("old")
-        self.assertEqual((row["status"], row["final_text"]), ("failed", "interrupted: server restarted"))
+        self.assertEqual((row["status"], row["final_text"]), ("interrupted", "interrupted: server restarted"))
         self.assertEqual(len(self.store.session_view("old")["turns"]), 2)
 
     async def test_shutdown_stops_every_worker_and_records_the_interruption(self):
@@ -231,7 +231,7 @@ class Failures(HubCase):
         await tui.event(b, "awaiting_input")
         await self.hub.shutdown()
         rows = [self.store.session(s) for s in (a, b)]
-        self.assertEqual({(r["status"], r["final_text"]) for r in rows}, {("failed", "interrupted: server stopped")})
+        self.assertEqual({(r["status"], r["final_text"]) for r in rows}, {("interrupted", "interrupted: server stopped")})
         self.assertEqual(self.hub.workers, {})
 
 
@@ -288,6 +288,250 @@ class HubImports(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", probe], cwd=ROOT / "loom", capture_output=True, text=True,
                              check=True)
         self.assertEqual(out.stdout.strip(), "")
+
+
+
+class SurvivalCase(HubCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        survive = mock.patch.dict(os.environ, {"FAKE_WORKER_SURVIVES": "1"})
+        survive.start()
+        self.addCleanup(survive.stop)
+        self.hub.keep_workers = True
+        self.later: list = []
+
+    async def asyncTearDown(self):
+        for hub in [self.hub, *self.later]:
+            hub.keep_workers = False
+            await hub.shutdown()
+        for row in self.store.workers():
+            server.transport.terminate(row["pid"])
+        await super().asyncTearDown()
+
+    async def stored(self, session_id, match, timeout=WAIT) -> dict:
+        async with asyncio.timeout(timeout):
+            while True:
+                for event in self.store.events(session_id):
+                    if match(event):
+                        return event
+                await asyncio.sleep(0.05)
+
+    async def restart(self) -> tuple["server.Hub", "Client", dict]:
+        await self.hub.shutdown()
+        self.server.close()
+        await self.server.wait_closed()
+        hub = server.Hub(self.store, db_path=self.db, default_workspace=self.project_a, log_dir=self.db.parent / "logs",
+                         worker_command=FAKE, keep_workers=True)
+        self.later.append(hub)
+        started = await hub.start()
+        self.server = await websockets.serve(hub.handler, "localhost", 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        return hub, await self.client(), started
+
+
+
+class SurvivingTheHub(SurvivalCase):
+    async def test_a_new_hub_adopts_a_running_worker(self):
+        tui = await self.client()
+        session_id = await tui.start()
+        pid = tui.pid(await tui.event(session_id, "agent_turn"))
+        await tui.event(session_id, "awaiting_input")
+        hub, tui, started = await self.restart()
+        self.assertEqual(started["adopted"], [session_id])
+        self.assertEqual(started["interrupted"], [])
+        await tui.send(type="attach_session", session_id=session_id)
+        await tui.until(lambda m: m.get("type") == "attached")
+        await tui.send(type="human_message", session_id=session_id, content="still there?")
+        self.assertEqual((await tui.event(session_id, "agent_turn", text="echo still there?"))["session_id"],
+                         session_id)
+        self.assertEqual(self.store.worker(session_id)["pid"], pid)
+        self.assertEqual(hub.sessions[session_id].status, "idle")
+
+    async def test_a_worker_that_died_while_the_hub_was_down_resumes_if_it_was_mid_run(self):
+        with mock.patch.dict(os.environ, {"FAKE_WORKER_HOLD": "1"}):
+            tui = await self.client()
+            session_id = await tui.start()
+            pid = tui.pid(await tui.event(session_id, "agent_turn"))
+            await self.hub.shutdown()
+            server.transport.terminate(pid)
+            while server.transport.pid_alive(pid):
+                await asyncio.sleep(0.05)
+            hub, tui, started = await self.restart()
+        self.assertEqual(started["resumed"], [session_id])
+        resumed = await self.stored(session_id, lambda e: e["type"] == "agent_turn"
+                                    and str(e["payload"].get("text", "")).startswith("resumed by"))
+        self.assertNotEqual(int(resumed["payload"]["text"].split()[-1]), pid)
+        self.assertEqual(self.store.session(session_id)["status"], "running")
+
+    async def test_an_idle_chat_whose_worker_died_waits_for_your_message(self):
+        tui = await self.client()
+        session_id = await tui.start()
+        pid = tui.pid(await tui.event(session_id, "agent_turn"))
+        await tui.event(session_id, "awaiting_input")
+        await self.hub.shutdown()
+        server.transport.terminate(pid)
+        while server.transport.pid_alive(pid):
+            await asyncio.sleep(0.05)
+        hub, tui, started = await self.restart()
+        self.assertEqual((started["interrupted"], started["resumed"]), ([session_id], []))
+        await tui.send(type="attach_session", session_id=session_id)
+        await tui.until(lambda m: m.get("type") == "attached")
+        await tui.send(type="human_message", session_id=session_id, content="hello again")
+        await tui.until(lambda m: m.get("type") == "human_message_queued")
+        await tui.event(session_id, "agent_turn", text="echo hello again")
+        self.assertEqual(self.store.session(session_id)["status"], "running")
+
+    async def test_a_worker_that_dies_mid_run_under_a_live_hub_comes_back_by_itself(self):
+        with mock.patch.dict(os.environ, {"FAKE_WORKER_HOLD": "1"}):
+            tui = await self.client()
+            session_id = await tui.start()
+            pid = tui.pid(await tui.event(session_id, "agent_turn"))
+            server.transport.terminate(pid)
+            await tui.event(session_id, "session_ended", status="interrupted")
+            resumed = await self.stored(session_id, lambda e: e["type"] == "agent_turn"
+                                        and str(e["payload"].get("text", "")).startswith("resumed by"))
+        self.assertNotEqual(int(resumed["payload"]["text"].split()[-1]), pid)
+
+    async def connected_worker(self, session_id):
+        async with asyncio.timeout(WAIT):
+            while True:
+                worker = self.hub._live_worker(session_id)
+                if worker is not None and worker.ready.is_set() and worker.alive and worker.writer is not None:
+                    return worker
+                await asyncio.sleep(0.05)
+
+    async def test_a_worker_that_keeps_dying_is_not_resumed_forever(self):
+        with mock.patch.dict(os.environ, {"FAKE_WORKER_HOLD": "1"}):
+            tui = await self.client()
+            session_id = await tui.start()
+            await tui.event(session_id, "agent_turn")
+            for _ in range(server.AUTO_RESUMES + 1):
+                worker = await self.connected_worker(session_id)
+                server.transport.terminate(worker.pid)
+                await asyncio.wait_for(worker.exited.wait(), WAIT)
+            await asyncio.sleep(1)
+        self.assertIsNone(self.hub._live_worker(session_id))
+        self.assertIsNone(self.store.worker(session_id))
+        self.assertEqual(self.store.session(session_id)["status"], "interrupted")
+        self.assertEqual(len(self.hub.auto_resumed[session_id]), server.AUTO_RESUMES)
+
+    async def test_stop_pauses_everything_and_a_restart_leaves_it_paused(self):
+        tui = await self.client()
+        session_id = await tui.start()
+        await tui.event(session_id, "awaiting_input")
+        stopped = await self.hub.stop_workers()
+        self.assertEqual(stopped, [session_id])
+        self.assertEqual(self.store.session(session_id)["status"], "paused")
+        self.assertEqual(self.store.workers(), [])
+        hub, tui, started = await self.restart()
+        self.assertEqual(started, {"adopted": [], "interrupted": [], "resumed": []})
+
+
+
+
+class DeletingChats(HubCase):
+    async def test_deleting_a_running_chat_stops_it_and_tells_every_window(self):
+        tui, other = await self.client(), await self.client()
+        await other.send(type="list_projects")
+        await other.until(lambda m: m.get("type") == "projects")
+        session_id = await tui.start()
+        pid = tui.pid(await tui.event(session_id, "agent_turn"))
+        await tui.send(type="delete_session", session_id=session_id)
+        done = await tui.until(lambda m: m.get("type") == "delete_session_done")
+        self.assertEqual(done["session_ids"], [session_id])
+        removed = await other.until(lambda m: m.get("type") == "session_removed")
+        self.assertEqual((removed["session_ids"], removed["reason"]), ([session_id], "deleted"))
+        self.assertIsNone(self.store.session(session_id))
+        self.assertFalse(server.transport.pid_alive(pid))
+        self.assertFalse((self.db.parent / "logs" / f"worker-{session_id}.log").exists())
+
+    async def test_archive_hides_a_stopped_chat_and_unarchive_brings_it_back(self):
+        tui = await self.client()
+        session_id = await tui.start()
+        await tui.event(session_id, "awaiting_input")
+        await tui.send(type="archive_session", session_id=session_id)
+        refused = await tui.until(lambda m: m.get("type") == "error")
+        self.assertIn("still running", refused["message"])
+        await tui.send(type="end_session", session_id=session_id)
+        await tui.event(session_id, "session_ended")
+        await tui.send(type="archive_session", session_id=session_id)
+        await tui.until(lambda m: m.get("type") == "session_removed" and m["reason"] == "archived")
+        await tui.send(type="list_sessions")
+        listed = await tui.until(lambda m: m.get("type") == "sessions")
+        self.assertEqual(listed["sessions"], [])
+        await tui.send(type="list_sessions", include_archived=True)
+        listed = await tui.until(lambda m: m.get("type") == "sessions")
+        self.assertTrue(listed["sessions"][0]["archived"])
+        await tui.send(type="archive_session", session_id=session_id, archived=False)
+        await tui.until(lambda m: m.get("type") == "archive_session_done")
+        await tui.send(type="list_sessions")
+        listed = await tui.until(lambda m: m.get("type") == "sessions")
+        self.assertEqual([r["session_id"] for r in listed["sessions"]], [session_id])
+
+    async def test_clean_up_previews_then_deletes_every_stopped_chat_in_the_project(self):
+        tui = await self.client()
+        running = await tui.start()
+        await tui.event(running, "awaiting_input")
+        stopped = []
+        for _ in range(3):
+            session_id = await tui.start()
+            await tui.event(session_id, "awaiting_input")
+            await tui.send(type="end_session", session_id=session_id)
+            await tui.event(session_id, "session_ended")
+            stopped.append(session_id)
+        elsewhere = await tui.start(self.project_b)
+        await tui.event(elsewhere, "awaiting_input")
+        await tui.send(type="end_session", session_id=elsewhere)
+        await tui.event(elsewhere, "session_ended")
+        await tui.send(type="clean_sessions", project=str(self.project_a), dry_run=True)
+        preview = await tui.until(lambda m: m.get("type") == "clean_sessions_preview")
+        self.assertEqual((preview["count"], sorted(preview["session_ids"])), (3, sorted(stopped)))
+        self.assertIsNotNone(self.store.session(stopped[0]))
+        await tui.send(type="clean_sessions", project=str(self.project_a))
+        done = await tui.until(lambda m: m.get("type") == "clean_sessions_done")
+        self.assertEqual(sorted(done["session_ids"]), sorted(stopped))
+        self.assertEqual({r["session_id"] for r in self.store.sessions()}, {running, elsewhere})
+
+
+SCRIPTED = [sys.executable, str(ROOT / "tests" / "scripted_worker.py")]
+
+
+class RealWorkerOverTheSocket(SurvivalCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        env = mock.patch.dict(os.environ, {"SCRIPT_SHOWS_HISTORY": "1", "FOX_WORKER_IDLE_SECONDS": "2"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.hub.worker_command = SCRIPTED
+
+    async def restart(self):
+        hub, tui, started = await super().restart()
+        hub.worker_command = SCRIPTED
+        return hub, tui, started
+
+    async def test_the_real_worker_survives_a_restart_then_pauses_when_idle_and_comes_back(self):
+        tui = await self.client()
+        session_id = await tui.start()
+        first = await tui.event(session_id, "agent_turn")
+        self.assertEqual(first["text"], "saw 1 turns, last: do it")
+        pid = self.store.worker(session_id)["pid"]
+        hub, tui, started = await self.restart()
+        self.assertEqual(started["adopted"], [session_id])
+        await tui.send(type="attach_session", session_id=session_id)
+        await tui.until(lambda m: m.get("type") == "attached")
+        await tui.send(type="human_message", session_id=session_id, content="still you?")
+        second = await tui.event(session_id, "agent_turn")
+        self.assertEqual(second["text"], "saw 3 turns, last: [Message from human]: still you?")
+        ended = await tui.until(lambda m: m.get("session_id") == session_id and m.get("type") == "session_ended",
+                                timeout=30)
+        self.assertEqual((ended["status"], ended["final_text"]), ("paused", "paused: idle"))
+        while server.transport.pid_alive(pid):
+            await asyncio.sleep(0.05)
+        await tui.send(type="human_message", session_id=session_id, content="and now?")
+        third = await tui.until(lambda m: m.get("session_id") == session_id and m.get("type") == "agent_turn",
+                                timeout=30)
+        self.assertEqual(third["text"], "saw 6 turns, last: [Message from human]: and now?")
+        self.assertNotEqual(self.store.worker(session_id)["pid"], pid)
 
 
 if __name__ == "__main__":
