@@ -13,6 +13,7 @@ import (
 	"fox/tui/internal/protocol"
 	"fox/tui/internal/state"
 	"fox/tui/internal/ui/approval"
+	"fox/tui/internal/ui/board"
 	"fox/tui/internal/ui/composer"
 	"fox/tui/internal/ui/diffview"
 	"fox/tui/internal/ui/layout"
@@ -75,7 +76,7 @@ type focus int
 const (
 	focusComposer focus = iota
 	focusSidebar
-	focusDiff
+	focusSide
 )
 
 type screen int
@@ -120,9 +121,11 @@ type Model struct {
 	askPath     bool
 	lastStart   string
 	diffOpen    bool
+	boardOpen   bool
 	changed     map[string]int
 
 	diff       diffview.Model
+	board      board.Model
 	sidebar    sidebar.Model
 	transcript transcript.Model
 	composer   composer.Model
@@ -146,6 +149,7 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 		changed:    map[string]int{},
 		connected:  true,
 		diff:       diffview.New(th),
+		board:      board.New(th),
 		sidebar:    sidebar.New(th),
 		transcript: transcript.New(th),
 		composer:   composer.New(th),
@@ -191,10 +195,10 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case diffview.SourceMsg:
 		m.diff.SetSource(msg.Source)
 		return m.requestDiff(msg.Source)
-	case diffview.CloseMsg:
-		return m.closeDiff()
-	case diffview.BlurMsg:
-		return m.blurDiff()
+	case diffview.CloseMsg, board.CloseMsg:
+		return m.closeSide()
+	case diffview.BlurMsg, board.BlurMsg:
+		return m.blurSide()
 	case client.DisconnectedMsg:
 		m.connected = false
 		m.flash = "disconnected from the server: " + msg.Err.Error()
@@ -440,12 +444,16 @@ func (m *Model) sync() {
 	if m.width == 0 {
 		return
 	}
-	showDiff := m.diffOpen && m.active != ""
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showDiff)
+	showSide := m.sideOpen() && m.active != ""
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide)
 	m.composer.SetWidth(m.frame.Main.W - 2)
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showDiff)
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide)
 	m.sidebar.SetSize(m.frame.Sidebar.W, m.frame.Sidebar.H)
-	m.diff.SetSize(m.frame.Diff.W, m.frame.Diff.H)
+	m.diff.SetSize(m.frame.Side.W, m.frame.Side.H)
+	m.board.SetSize(m.frame.Side.W, m.frame.Side.H)
+	if m.boardOpen {
+		m.board.Layout(board.Cards(m.store.Session(m.active)))
+	}
 	status := 0
 	if m.statusLine() != "" {
 		status = 1
@@ -460,6 +468,7 @@ func (m *Model) selectSession(id, task string) tea.Cmd {
 	m.picking = false
 	focus := m.setFocus(focusComposer)
 	diff := m.followDiff()
+	m.board.Follow()
 	sess := m.store.Session(id)
 	if sess == nil || sess.Loaded || m.attaching[id] {
 		return tea.Batch(focus, diff)
@@ -472,7 +481,7 @@ func (m *Model) setFocus(f focus) tea.Cmd {
 	if f == focusSidebar && !m.frame.HasSidebar && m.width > 0 {
 		f = focusComposer
 	}
-	if f == focusDiff && !m.diffOpen {
+	if f == focusSide && !m.sideOpen() {
 		f = focusComposer
 	}
 	m.focus = f
@@ -697,8 +706,11 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.picker.Update(msg, m.store.Models)
 	}
 
-	if m.focus == focusDiff && diffview.Handles(k) {
+	if m.focus == focusSide && m.diffOpen && diffview.Handles(k) {
 		return m.diff.Key(msg)
+	}
+	if m.focus == focusSide && m.boardOpen && board.Handles(k) {
+		return m.board.Key(msg)
 	}
 
 	switch k {
@@ -706,10 +718,12 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.setFocus(m.nextFocus())
 	case "ctrl+d":
 		return m.toggleDiff()
+	case "ctrl+b":
+		return m.toggleBoard()
 	case "esc":
 		switch {
-		case m.focus == focusDiff:
-			return m.blurDiff()
+		case m.focus == focusSide:
+			return m.blurSide()
 		case m.focus == focusSidebar:
 			return m.setFocus(focusComposer)
 		case m.draft != nil:
@@ -764,7 +778,7 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	switch m.focus {
 	case focusSidebar:
 		return m.sidebar.Key(msg)
-	case focusDiff:
+	case focusSide:
 		return nil
 	}
 	return m.composer.Update(msg)
@@ -826,11 +840,13 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		return m.picker.Press(y, m.store.Models)
 	}
 	switch {
-	case f.HasDiff && f.Diff.Contains(msg.X, msg.Y):
-		x, y := f.Diff.Local(msg.X, msg.Y)
-		m.diff.Press(x, y)
-		return m.setFocus(focusDiff)
-	case f.HasDiff && f.DiffFull:
+	case f.HasSide && f.Side.Contains(msg.X, msg.Y):
+		if m.diffOpen {
+			x, y := f.Side.Local(msg.X, msg.Y)
+			m.diff.Press(x, y)
+		}
+		return m.setFocus(focusSide)
+	case f.HasSide && f.SideFull:
 		return nil
 	case f.HasSidebar && f.Divider.Contains(msg.X, msg.Y):
 		m.resizing = true
@@ -885,8 +901,12 @@ func (m *Model) wheel(msg tea.MouseWheelMsg) {
 		m.sidebar.Scroll(delta)
 		return
 	}
-	if m.frame.HasDiff && m.frame.Diff.Contains(msg.X, msg.Y) {
-		m.diff.Scroll(delta)
+	if m.frame.HasSide && m.frame.Side.Contains(msg.X, msg.Y) {
+		if m.boardOpen {
+			m.board.Scroll(delta)
+		} else {
+			m.diff.Scroll(delta)
+		}
 		return
 	}
 	if delta < 0 {
@@ -945,7 +965,10 @@ func (m Model) hint() string {
 	if m.focus == focusSidebar {
 		return "↑↓ move · enter open · n new chat · d delete · a archive · c clear project · ←→ fold · tab back"
 	}
-	if m.focus == focusDiff {
+	if m.focus == focusSide && m.boardOpen {
+		return "j/k scroll · h/l pan · n/p card · esc back to chat · ctrl+b close"
+	}
+	if m.focus == focusSide {
 		return "j/k scroll · n/p file · g fox or git · esc back to chat · ctrl+d close"
 	}
 	switch {
@@ -982,7 +1005,7 @@ func (m Model) render() string {
 		return m.vault.View(m.store.Models, m.width, m.height)
 	}
 	f := m.frame
-	base := m.withDiff(m.mainView())
+	base := m.withSide(m.mainView())
 	if f.HasSidebar {
 		rule := th.Rule
 		if m.resizing {
