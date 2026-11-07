@@ -213,7 +213,7 @@ func parseEdge(sc *scanner) (edge, bool) {
 	if m := edgeText.FindStringSubmatch(rest); m != nil {
 		sc.i += len([]rune(m[0]))
 		end := m[4]
-		return edge{label: m[3], dashed: strings.Contains(m[2]+end, "."), tail: m[1] == "<",
+		return edge{label: edgeLabel(m[3]), dashed: strings.Contains(m[2]+end, "."), tail: m[1] == "<",
 			head: strings.HasSuffix(end, ">") || strings.HasSuffix(end, "x") || strings.HasSuffix(end, "o")}, true
 	}
 	m := edgePlain.FindStringSubmatch(rest)
@@ -221,7 +221,11 @@ func parseEdge(sc *scanner) (edge, bool) {
 		return edge{}, false
 	}
 	sc.i += len([]rune(m[0]))
-	return edge{label: strings.TrimSpace(m[6]), dashed: m[4] != "", tail: m[1] == "<", head: m[3] != "" || m[5] != ""}, true
+	return edge{label: edgeLabel(m[6]), dashed: m[4] != "", tail: m[1] == "<", head: m[3] != "" || m[5] != ""}, true
+}
+
+func edgeLabel(label string) string {
+	return strings.Join(labelLines(label), " ")
 }
 
 func ansiCut(s string, n int) string {
