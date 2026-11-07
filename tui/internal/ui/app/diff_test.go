@@ -63,14 +63,14 @@ func TestCtrlDNeedsAChat(t *testing.T) {
 func TestCtrlDOpensThePaneBesideTheChat(t *testing.T) {
 	m, r := activeChat(t, 160)
 	ctrlD(m)
-	if !m.diffOpen || m.focus != focusDiff {
+	if !m.diffOpen || m.focus != focusSide {
 		t.Fatalf("open %v focus %v", m.diffOpen, m.focus)
 	}
 	if got := r.diffs(); len(got) != 1 || got[0] != (protocol.FileDiff{SessionID: "s1", Source: "fox"}) {
 		t.Fatalf("sent %+v", got)
 	}
 	f := m.frame
-	if !f.HasDiff || f.DiffFull || f.Diff.X <= f.Main.X || f.Main.W+1+f.Diff.W+f.Sidebar.W+1 != 160 {
+	if !f.HasSide || f.SideFull || f.Side.X <= f.Main.X || f.Main.W+1+f.Side.W+f.Sidebar.W+1 != 160 {
 		t.Fatalf("frame %+v", f)
 	}
 	event(t, m, oneFile)
@@ -85,7 +85,7 @@ func TestCtrlDOpensThePaneBesideTheChat(t *testing.T) {
 func TestANarrowWindowGivesThePaneTheWholeColumn(t *testing.T) {
 	m, _ := activeChat(t, 90)
 	ctrlD(m)
-	if !m.frame.DiffFull {
+	if !m.frame.SideFull {
 		t.Fatalf("frame %+v", m.frame)
 	}
 	m.update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -104,7 +104,7 @@ func TestEscGoesBackToTheChatAndCtrlDCloses(t *testing.T) {
 		t.Fatalf("open %v focus %v", m.diffOpen, m.focus)
 	}
 	ctrlD(m)
-	if m.diffOpen || m.frame.HasDiff {
+	if m.diffOpen || m.frame.HasSide {
 		t.Fatal("ctrl+d did not close the pane")
 	}
 }
@@ -167,7 +167,7 @@ func TestTabReachesThePane(t *testing.T) {
 		m.sync()
 		seen[m.focus] = true
 	}
-	if !seen[focusDiff] || !seen[focusSidebar] || !seen[focusComposer] {
+	if !seen[focusSide] || !seen[focusSidebar] || !seen[focusComposer] {
 		t.Fatalf("tab visited %v", seen)
 	}
 }
