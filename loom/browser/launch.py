@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import paths
+import transport
 from browser.cdp import CDPConnection, CDPError
 
 CANDIDATES = {
@@ -265,6 +266,7 @@ def stop(browser: Browser, timeout: float = 5.0) -> None:
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **transport.hidden(),
         )
     else:
         process.kill()
