@@ -6,6 +6,7 @@ from orchestration.tasks import Lane, Task
 READ_LANE_TOOLS: frozenset[str] = (
     frozenset(name for name, (_, modifies) in permissions.PATH_TOOLS.items() if not modifies)
     | frozenset(permissions.INTERNAL_TOOLS)
+    | permissions.WEB_TOOLS
     | {"run_bash_command"}
 )
 
