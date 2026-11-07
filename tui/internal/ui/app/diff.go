@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"fox/tui/internal/protocol"
+	"fox/tui/internal/ui/board"
 	"fox/tui/internal/ui/diffview"
 )
 
@@ -33,6 +34,8 @@ func (m *Model) afterEvent(ev protocol.Event) tea.Cmd {
 		}
 		gitView := m.diffOpen && m.diff.Source() == diffview.Git
 		switch p.Name {
+		case board.Tool:
+			m.boardDrawn(p.Content)
 		case "write_file", "edit_file":
 			if gitView {
 				return tea.Batch(m.requestDiff(diffview.Fox), m.requestDiff(diffview.Git))
@@ -71,28 +74,60 @@ func (m *Model) followDiff() tea.Cmd {
 
 func (m *Model) toggleDiff() tea.Cmd {
 	if m.diffOpen {
-		return m.closeDiff()
+		return m.closeSide()
 	}
 	if m.active == "" {
 		m.flash = "start a chat first · ctrl+d then shows the files it changed"
 		return nil
 	}
-	m.diffOpen = true
+	m.diffOpen, m.boardOpen = true, false
 	m.diff.Open(m.active)
-	return tea.Batch(m.setFocus(focusDiff), m.requestDiff(m.diff.Source()))
+	return tea.Batch(m.setFocus(focusSide), m.requestDiff(m.diff.Source()))
 }
 
-func (m *Model) closeDiff() tea.Cmd {
-	m.diffOpen = false
-	if m.focus == focusDiff {
+func (m *Model) toggleBoard() tea.Cmd {
+	if m.boardOpen {
+		return m.closeSide()
+	}
+	if m.active == "" {
+		m.flash = "start a chat first · ctrl+b then shows what fox draws"
+		return nil
+	}
+	m.boardOpen, m.diffOpen = true, false
+	m.board.Follow()
+	return m.setFocus(focusSide)
+}
+
+func (m *Model) boardDrawn(result string) {
+	if strings.HasPrefix(strings.TrimSpace(result), `{"error"`) {
+		return
+	}
+	switch {
+	case m.boardOpen:
+		m.board.Follow()
+	case m.diffOpen:
+		m.flash = "fox drew on the board · ctrl+b shows it"
+	default:
+		m.boardOpen = true
+		m.board.Follow()
+	}
+}
+
+func (m Model) sideOpen() bool {
+	return m.diffOpen || m.boardOpen
+}
+
+func (m *Model) closeSide() tea.Cmd {
+	m.diffOpen, m.boardOpen = false, false
+	if m.focus == focusSide {
 		return m.setFocus(focusComposer)
 	}
 	return nil
 }
 
-func (m *Model) blurDiff() tea.Cmd {
-	if m.frame.DiffFull {
-		return m.closeDiff()
+func (m *Model) blurSide() tea.Cmd {
+	if m.frame.SideFull {
+		return m.closeSide()
 	}
 	return m.setFocus(focusComposer)
 }
@@ -103,32 +138,38 @@ func (m Model) nextFocus() focus {
 		if m.frame.HasSidebar {
 			return focusSidebar
 		}
-		if m.diffOpen {
-			return focusDiff
+		if m.sideOpen() {
+			return focusSide
 		}
 	case focusSidebar:
-		if m.diffOpen {
-			return focusDiff
+		if m.sideOpen() {
+			return focusSide
 		}
 	}
 	return focusComposer
 }
 
-func (m Model) withDiff(main string) string {
+func (m *Model) withSide(main string) string {
 	f := m.frame
-	if !f.HasDiff {
+	if !f.HasSide {
 		return main
 	}
-	pane := lipgloss.NewStyle().Width(f.Diff.W).Height(f.Diff.H).MaxWidth(f.Diff.W).MaxHeight(f.Diff.H).
-		Render(m.diff.View(m.focus == focusDiff))
-	if f.DiffFull {
+	content := ""
+	if m.boardOpen {
+		content = m.board.View(board.Cards(m.store.Session(m.active)), m.focus == focusSide)
+	} else {
+		content = m.diff.View(m.focus == focusSide)
+	}
+	pane := lipgloss.NewStyle().Width(f.Side.W).Height(f.Side.H).MaxWidth(f.Side.W).MaxHeight(f.Side.H).
+		Render(content)
+	if f.SideFull {
 		return pane
 	}
 	main = lipgloss.NewStyle().Width(f.Main.W).Height(f.Main.H).MaxWidth(f.Main.W).MaxHeight(f.Main.H).Render(main)
 	rule := m.theme.Rule
-	if m.focus == focusDiff {
+	if m.focus == focusSide {
 		rule = m.theme.Accent
 	}
-	divider := rule.Render(strings.TrimSuffix(strings.Repeat("│\n", f.DiffDivider.H), "\n"))
+	divider := rule.Render(strings.TrimSuffix(strings.Repeat("│\n", f.SideDivider.H), "\n"))
 	return lipgloss.JoinHorizontal(lipgloss.Top, main, divider, pane)
 }
