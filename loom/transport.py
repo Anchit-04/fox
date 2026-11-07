@@ -11,12 +11,17 @@ HELLO = "hello"
 TOKEN_ENV = "FOX_WORKER_TOKEN"
 ROOT_ENV = "FOX_WORKER_ROOT"
 STILL_ACTIVE = 259
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def detached() -> dict:
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW}
     return {"start_new_session": True}
+
+
+def hidden() -> dict:
+    return {"creationflags": NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def pid_alive(pid: int | None) -> bool:
@@ -51,7 +56,7 @@ def terminate(pid: int | None) -> None:
         return
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+                       stderr=subprocess.DEVNULL, **hidden())
     else:
         import signal
         os.kill(pid, signal.SIGKILL)
