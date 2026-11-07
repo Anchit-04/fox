@@ -15,7 +15,8 @@ from typing import Callable
 from tools import file_tools
 from tools.file_tools import FILE_TOOLS, FILE_TOOL_HANDLERS
 from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
-from tools import browser_tools
+from tools import browser_tools, web
+from tools.web import WEB_TOOLS, WEB_TOOL_HANDLERS
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
@@ -78,7 +79,7 @@ Rules:
 def build_system_prompt(model_key: str) -> str:
     """Fox identity + the tool/behaviour rules. Built per run rather than
     stored as a constant, since the identity block names the live model."""
-    return IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + browser_tools.prompt_note(model_key)
+    return IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE + browser_tools.prompt_note(model_key)
 
 # --- Tool definitions --------------------------------------------------------
 # Plain JSON-schema dicts — each provider adapter converts these to its own
@@ -105,13 +106,22 @@ BASH_TOOL = {
     },
 }
 
-ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS
+ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS + WEB_TOOLS
 
 
 # --- Tool execution -----------------------------------------------------------
 
 def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
                  extra_handlers: dict | None = None) -> str:
+    try:
+        return _execute(name, args, model_key, todo_manager, mem, extra_handlers)
+    except Exception as e:
+        return json.dumps({"error": f"{name} failed: {type(e).__name__}: {e}. Fix the arguments or try "
+                                    "another way; don't repeat the same call."})
+
+
+def _execute(name: str, args: dict, model_key: str, todo_manager: TodoManager, mem: memory.Memory,
+             extra_handlers: dict | None = None) -> str:
     if extra_handlers and name in extra_handlers:
         return extra_handlers[name](args)
     if name == "run_bash_command":
@@ -120,6 +130,8 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
         return FILE_TOOL_HANDLERS[name](args)
     if name in TODO_TOOL_HANDLERS:
         return TODO_TOOL_HANDLERS[name](todo_manager, args)
+    if name in WEB_TOOL_HANDLERS:
+        return WEB_TOOL_HANDLERS[name](args)
     if name in memory.MEMORY_TOOL_HANDLERS:
         return memory.MEMORY_TOOL_HANDLERS[name](mem, model_key, args)
     return json.dumps({"error": f"Unknown tool: {name}"})
@@ -127,7 +139,7 @@ def execute_tool(name: str, args: dict, model_key: str, todo_manager: TodoManage
 
 def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
     return (name == "run_bash_command" or name in FILE_TOOL_HANDLERS or name in TODO_TOOL_HANDLERS
-            or name in memory.MEMORY_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
+            or name in memory.MEMORY_TOOL_HANDLERS or name in WEB_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
 
 
 def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
