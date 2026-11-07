@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 
 import paths
+import transport
 
 MAX_OUTPUT_CHARS = 8000  # context-budget cap, not a sandboxing concern — sandboxd itself doesn't truncate
 COMMAND_TIMEOUT_SECONDS = 30
@@ -59,6 +60,7 @@ def _start() -> subprocess.Popen:
         text=True,
         encoding="utf-8",
         bufsize=1,  # line-buffered, matches the line-per-message protocol
+        **transport.hidden(),
     )
     return proc
 
