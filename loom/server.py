@@ -10,6 +10,7 @@ from pathlib import Path
 
 import websockets
 
+import diffs
 import paths
 import permissions
 import transport
@@ -122,6 +123,7 @@ class Hub:
             "delete_session": self.delete_session,
             "archive_session": self.archive_session,
             "clean_sessions": self.clean_sessions,
+            "file_diff": self.file_diff,
         }
 
     def mark_interrupted(self) -> list[str]:
@@ -556,6 +558,20 @@ class Hub:
             except WorkerGone:
                 pass
         await _reply(ws, {"type": "models", "models": [asdict(e) for e in vault.list_models()]})
+
+    async def file_diff(self, ws, msg: dict) -> None:
+        session_id = msg["session_id"]
+        source = "git" if msg.get("source") == "git" else "fox"
+        info = self.sessions.get(session_id)
+        row = None if info is not None else self.store.session(session_id)
+        if info is None and row is None:
+            await _reply(ws, {"type": "error", "message": f"unknown session_id {session_id!r}"})
+            return
+        workspace = info.workspace if info is not None else row["workspace"]
+        rows = self.store.baselines(session_id) if source == "fox" else []
+        files, note = await asyncio.to_thread(diffs.changes, source, rows, workspace)
+        await _reply(ws, {"type": "file_diff", "session_id": session_id, "source": source, "files": files,
+                          "note": note})
 
     async def list_projects(self, ws, msg: dict) -> None:
         await _reply(ws, {"type": "projects", "current": str(self.default_workspace),
