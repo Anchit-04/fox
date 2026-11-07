@@ -74,6 +74,11 @@ def _resolve(path: str) -> Path:
     The root is read per call, never cached at module level — the workspace is
     chosen at startup, after this module is imported.
     """
+    if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]+://", str(path)):
+        raise PathTraversalError(
+            f"'{path}' is a web address, not a file. Read it with web_fetch, or with browser_snapshot "
+            "if it is the page open in the browser."
+        )
     root = paths.workspace()
     candidate = (root / path).resolve()
     if str(candidate) in _approved_paths():
