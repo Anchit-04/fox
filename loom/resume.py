@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import transport
 from orchestration.tasks import Lane, Report, Task, TaskRegistry, TaskStatus
 from providers import Turn
 
@@ -60,7 +61,7 @@ def last_url(turns: list[Turn]) -> str | None:
 def git_lines(workspace: str | Path, *args: str) -> list[str] | None:
     try:
         done = subprocess.run(["git", *args], cwd=workspace, capture_output=True, text=True,
-                              timeout=GIT_TIMEOUT_SECONDS)
+                              timeout=GIT_TIMEOUT_SECONDS, **transport.hidden())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if done.returncode != 0:
