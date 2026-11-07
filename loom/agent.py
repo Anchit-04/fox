@@ -17,6 +17,7 @@ from tools.file_tools import FILE_TOOLS, FILE_TOOL_HANDLERS
 from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 from tools import browser_tools, web
 from tools.web import WEB_TOOLS, WEB_TOOL_HANDLERS
+import git_context
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
@@ -79,7 +80,8 @@ Rules:
 def build_system_prompt(model_key: str) -> str:
     """Fox identity + the tool/behaviour rules. Built per run rather than
     stored as a constant, since the identity block names the live model."""
-    return IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE + browser_tools.prompt_note(model_key)
+    return (IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE
+            + git_context.prompt_note(paths.workspace()) + browser_tools.prompt_note(model_key))
 
 # --- Tool definitions --------------------------------------------------------
 # Plain JSON-schema dicts — each provider adapter converts these to its own
@@ -185,7 +187,11 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
                      "mode forbids it — don't retry, and don't work around it. "
                      "Tell the user what you needed and why."
         })
-    if approver.approve(tc.name, args, decision.reason):
+    if decision.every_time:
+        granted = approver.approve(tc.name, args, decision.reason, every_time=True)
+    else:
+        granted = approver.approve(tc.name, args, decision.reason)
+    if granted:
         # Consent has to actually grant the thing. The file tools
         # are workspace-bound in _resolve(), so without this an
         # approved out-of-workspace write would still fail — the
