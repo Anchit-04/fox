@@ -79,6 +79,8 @@ BROWSER_TOOLS = frozenset({
     "browser_layout_check", "browser_screenshot", "browser_look", "browser_ask_human",
 })
 
+WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+
 # --- Bash heuristics ---------------------------------------------------------
 
 # Commands that only read, and whose name can't be a path into somewhere else.
@@ -182,6 +184,8 @@ def classify(tool_name: str, args: dict, mode: str = WORKSPACE_WRITE,
         return Decision(ASK, f"uploads project files to a website: {names}")
     if tool_name in BROWSER_TOOLS:
         return Decision(ALLOW, "browsing")
+    if tool_name in WEB_TOOLS:
+        return Decision(ALLOW, "reads the web, touches no files")
 
     if tool_name in PATH_TOOLS:
         arg_name, modifies = PATH_TOOLS[tool_name]
