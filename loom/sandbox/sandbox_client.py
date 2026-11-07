@@ -17,6 +17,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+import git_context
 import paths
 import transport
 
@@ -60,6 +61,7 @@ def _start() -> subprocess.Popen:
         text=True,
         encoding="utf-8",
         bufsize=1,  # line-buffered, matches the line-per-message protocol
+        env=git_context.quiet_env(),
         **transport.hidden(),
     )
     return proc
