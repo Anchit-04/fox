@@ -17,6 +17,7 @@ from tools.file_tools import FILE_TOOLS, FILE_TOOL_HANDLERS
 from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 from tools import browser_tools, web
 from tools.web import WEB_TOOLS, WEB_TOOL_HANDLERS
+import baselines
 import paths
 import permissions
 from approval import CLIApprover, DenyApprover
@@ -175,6 +176,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         return refusal
     decision = permissions.classify(tc.name, args, mode)
     if decision.action == permissions.ALLOW:
+        baselines.capture(event_sink, task_id, tc.name, args)
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
     if decision.action == permissions.DENY:
         # Refused by the session's mode, not by a person — say so,
@@ -194,6 +196,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         # re-asking, and each new path still gets granted here.
         if tc.name in permissions.PATH_TOOLS and args.get("path"):
             file_tools.allow_path(args["path"])
+        baselines.capture(event_sink, task_id, tc.name, args)
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
     if verbose:
         print("\033[91mDenied.\033[0m")
