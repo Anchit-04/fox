@@ -73,10 +73,10 @@ type Frame struct {
 	Main       Rect
 	HasSidebar bool
 
-	Diff        Rect
-	DiffDivider Rect
-	HasDiff     bool
-	DiffFull    bool
+	Side        Rect
+	SideDivider Rect
+	HasSide     bool
+	SideFull    bool
 }
 
 const (
@@ -99,7 +99,7 @@ func SidebarWidth(width, preferred int) int {
 	return min(max(preferred, MinSidebar), max(width-minMain-1, MinSidebar))
 }
 
-func Compute(width, height, sidebarPreferred, composerHeight int, diff bool) Frame {
+func Compute(width, height, sidebarPreferred, composerHeight int, side bool) Frame {
 	screen := Rect{W: width, H: height}
 	var f Frame
 	sidebarW := SidebarWidth(width, sidebarPreferred)
@@ -110,13 +110,13 @@ func Compute(width, height, sidebarPreferred, composerHeight int, diff bool) Fra
 	} else {
 		f.Main = screen
 	}
-	if diff {
-		f.HasDiff = true
+	if side {
+		f.HasSide = true
 		if f.Main.W >= SplitWidth {
 			cols := SplitH(f.Main, 0, 1, f.Main.W/2)
-			f.Main, f.DiffDivider, f.Diff = cols[0], cols[1], cols[2]
+			f.Main, f.SideDivider, f.Side = cols[0], cols[1], cols[2]
 		} else {
-			f.Diff, f.DiffFull = f.Main, true
+			f.Side, f.SideFull = f.Main, true
 		}
 	}
 	rows := SplitV(f.Main, 1, 1, 0, composerHeight)
