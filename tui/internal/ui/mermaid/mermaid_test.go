@@ -32,6 +32,14 @@ func TestALeftToRightChain(t *testing.T) {
 	}
 }
 
+func TestLineBreaksInEdgeLabels(t *testing.T) {
+	out := render(t, "graph TD\n  A -->|ef=1<br/>top layer| B\n  B -- \"raw<br>math\" --> C", 0)
+	has(t, out, "ef=1 top layer", "raw math")
+	if strings.Contains(out, "<br") {
+		t.Fatalf("a <br> was left in:\n%s", out)
+	}
+}
+
 func TestATopDownTreeWithLabels(t *testing.T) {
 	out := render(t, "graph TD\n  A[Orchestrator] -->|delegate| B[Executor 1]\n  A -->|delegate| C[Executor 2]\n  B --> M[Shared memory]\n  C --> M", 0)
 	has(t, out, "│ Orchestrator │", "┬", "▼ delegate", "│ Executor 1 │", "│ Executor 2 │", "│ Shared memory │")
