@@ -1,7 +1,9 @@
 import json
 from dataclasses import dataclass, field
 
+import git_context
 import memory
+import paths
 import permissions
 from agent import ALL_TOOLS, IDENTITY, restore_todos, run_tool_call
 from events import emit
@@ -185,6 +187,7 @@ def _system_prompt(run: _Run) -> str:
             "say what you would change and ask the user to switch the session to a writable mode.\n"
         )
     parts.append(web.WEB_NOTE)
+    parts.append(git_context.prompt_note(paths.workspace()))
     parts.append(browser_tools.prompt_note(run.model_key))
     parts.append("\n## Executor specialties\n" + preferences.render_for_prompt())
     return "".join(parts)
