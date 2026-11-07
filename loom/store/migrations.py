@@ -128,6 +128,14 @@ MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
     _add_history_storage,
     _allow_resume_statuses,
     _allow_archive_and_orphan_notes,
+    """CREATE TABLE file_baselines (
+        session_id TEXT NOT NULL,
+        path       TEXT NOT NULL,
+        existed    INTEGER NOT NULL,
+        content    TEXT,
+        taken_at   TEXT NOT NULL,
+        PRIMARY KEY (session_id, path)
+    );""",
 ]
 
 
