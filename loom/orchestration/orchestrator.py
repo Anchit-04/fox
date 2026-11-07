@@ -18,7 +18,7 @@ from orchestration.policy import READ_LANE_TOOLS, lane_from_proposal
 from orchestration.tasks import Lane, Task, TaskRegistry, UnknownTask
 from providers import ToolOutput, ToolResult, Turn, get_provider, has_vision
 from sandbox.sandbox_client import SHELL_NOTE
-from tools import browser_tools, file_tools
+from tools import browser_tools, file_tools, web
 from tools.todo_tool import TodoManager
 
 SYSTEM_PROMPT = """You are the orchestrator. You can read and edit files and run commands yourself, and you can hand tasks to executor agents.
@@ -184,6 +184,7 @@ def _system_prompt(run: _Run) -> str:
             "\nThis session is read-only: you and every task can only read. If the job needs changes, "
             "say what you would change and ask the user to switch the session to a writable mode.\n"
         )
+    parts.append(web.WEB_NOTE)
     parts.append(browser_tools.prompt_note(run.model_key))
     parts.append("\n## Executor specialties\n" + preferences.render_for_prompt())
     return "".join(parts)
