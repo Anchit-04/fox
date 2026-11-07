@@ -470,6 +470,9 @@ func (m *Model) selectSession(id, task string) tea.Cmd {
 	diff := m.followDiff()
 	m.board.Follow()
 	sess := m.store.Session(id)
+	if m.boardOpen && len(board.Cards(sess)) == 0 {
+		m.boardOpen = false
+	}
 	if sess == nil || sess.Loaded || m.attaching[id] {
 		return tea.Batch(focus, diff)
 	}
