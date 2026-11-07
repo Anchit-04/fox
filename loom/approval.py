@@ -30,7 +30,7 @@ class Approver:
     """Interface. approve() is called only for ASK decisions — ALLOW and DENY
     are settled by policy and never reach here."""
 
-    def approve(self, tool_name: str, args: dict, reason: str) -> bool:
+    def approve(self, tool_name: str, args: dict, reason: str, every_time: bool = False) -> bool:
         raise NotImplementedError
 
     def remember(self, tool_name: str) -> None:
@@ -50,7 +50,7 @@ class DenyApprover(Approver):
     """Nobody to ask, so nothing is granted. Used for delegated executors,
     which run on worker threads with no route back to a human."""
 
-    def approve(self, tool_name: str, args: dict, reason: str) -> bool:
+    def approve(self, tool_name: str, args: dict, reason: str, every_time: bool = False) -> bool:
         return False
 
 
@@ -65,8 +65,8 @@ class CLIApprover(Approver):
     def remember(self, tool_name: str) -> None:
         self._always.add(tool_name)
 
-    def approve(self, tool_name: str, args: dict, reason: str) -> bool:
-        if tool_name in self._always:
+    def approve(self, tool_name: str, args: dict, reason: str, every_time: bool = False) -> bool:
+        if tool_name in self._always and not every_time:
             return True
         print(f"\n\033[91m[approve]\033[0m {describe(tool_name, args)}")
         print(f"\033[93m  why ask:\033[0m {reason}")
@@ -78,7 +78,8 @@ class CLIApprover(Approver):
             print("\033[91mNo input available — denying.\033[0m")
             return False
         if answer == "a":
-            self.remember(tool_name)
+            if not every_time:
+                self.remember(tool_name)
             return True
         return answer == "y"
 
@@ -124,17 +125,20 @@ class ApprovalGate(Approver):
         self._answers: dict[str, bool] = {}
         self._always: set[str] = set()
         self._handoffs: set[str] = set()
+        self._every_time: set[str] = set()
         self._closed = False
         self._ids = itertools.count(1)
         self._emit = emit  # callable(event_type, payload) — the session's sink
 
-    def approve(self, tool_name: str, args: dict, reason: str) -> bool:
+    def approve(self, tool_name: str, args: dict, reason: str, every_time: bool = False) -> bool:
         with self._condition:
-            if tool_name in self._always:
+            if tool_name in self._always and not every_time:
                 return True
             if self._closed:
                 return False
             request_id = f"approval_{next(self._ids)}"
+            if every_time:
+                self._every_time.add(request_id)
 
         if self._emit is not None:
             self._emit("approval_requested", {
@@ -148,6 +152,7 @@ class ApprovalGate(Approver):
         with self._condition:
             while request_id not in self._answers and not self._closed:
                 self._condition.wait()
+            self._every_time.discard(request_id)
             # A closed session denies whatever was still in flight.
             return self._answers.pop(request_id, False)
 
@@ -183,7 +188,8 @@ class ApprovalGate(Approver):
     def respond(self, request_id: str, approved: bool, always: bool = False,
                 tool_name: str | None = None) -> None:
         with self._condition:
-            if always and approved and tool_name and request_id not in self._handoffs:
+            if always and approved and tool_name and request_id not in self._handoffs \
+                    and request_id not in self._every_time:
                 self._always.add(tool_name)
             self._answers[request_id] = approved
             self._condition.notify_all()
