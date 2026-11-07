@@ -125,6 +125,9 @@ def prompt_note(model_key: str) -> str:
     return BROWSER_NOTE + BLIND_NOTE + (LOOK_NOTE if vision.helper_model() else "")
 
 
+LOST = object()
+
+
 def _error(message: str) -> str:
     return json.dumps({"error": message})
 
@@ -182,8 +185,16 @@ class BrowserSession:
     def call(self, name: str, args: dict) -> str | ToolOutput:
         if name != "browser_open" and not self.active:
             return _error("No page is open. Call browser_open first.")
+        result = self._attempt(name, args or {})
+        if result is LOST and name == "browser_open":
+            result = self._attempt(name, args or {})
+        if result is LOST:
+            return _error("The browser window was closed or crashed. browser_open starts a new one.")
+        return result
+
+    def _attempt(self, name: str, args: dict):
         try:
-            return self._dispatch(name, args or {})
+            return self._dispatch(name, args)
         except NeedsHuman as e:
             return self._handoff(e.need.kind, str(e), e.ref)
         except ActionError as e:
@@ -195,7 +206,7 @@ class BrowserSession:
         except CDPError as e:
             if self._lost():
                 self._drop()
-                return _error("The browser window was closed or crashed. browser_open starts a new one.")
+                return LOST
             return _error(f"The browser reported an error: {e}")
 
     def close(self) -> None:
