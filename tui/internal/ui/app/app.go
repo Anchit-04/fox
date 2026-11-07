@@ -14,6 +14,7 @@ import (
 	"fox/tui/internal/state"
 	"fox/tui/internal/ui/approval"
 	"fox/tui/internal/ui/composer"
+	"fox/tui/internal/ui/diffview"
 	"fox/tui/internal/ui/layout"
 	"fox/tui/internal/ui/modelpicker"
 	"fox/tui/internal/ui/sidebar"
@@ -74,6 +75,7 @@ type focus int
 const (
 	focusComposer focus = iota
 	focusSidebar
+	focusDiff
 )
 
 type screen int
@@ -117,7 +119,10 @@ type Model struct {
 	chat        newChat
 	askPath     bool
 	lastStart   string
+	diffOpen    bool
+	changed     map[string]int
 
+	diff       diffview.Model
 	sidebar    sidebar.Model
 	transcript transcript.Model
 	composer   composer.Model
@@ -138,7 +143,9 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 		sidebarW:   opts.SidebarWidth,
 		working:    map[string]time.Time{},
 		attaching:  map[string]bool{},
+		changed:    map[string]int{},
 		connected:  true,
+		diff:       diffview.New(th),
 		sidebar:    sidebar.New(th),
 		transcript: transcript.New(th),
 		composer:   composer.New(th),
@@ -180,6 +187,14 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.width, m.height = msg.Width, msg.Height
 	case client.EventMsg:
 		m.onEvent(msg.Event)
+		return m.afterEvent(msg.Event)
+	case diffview.SourceMsg:
+		m.diff.SetSource(msg.Source)
+		return m.requestDiff(msg.Source)
+	case diffview.CloseMsg:
+		return m.closeDiff()
+	case diffview.BlurMsg:
+		return m.blurDiff()
 	case client.DisconnectedMsg:
 		m.connected = false
 		m.flash = "disconnected from the server: " + msg.Err.Error()
@@ -425,10 +440,12 @@ func (m *Model) sync() {
 	if m.width == 0 {
 		return
 	}
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height())
+	showDiff := m.diffOpen && m.active != ""
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showDiff)
 	m.composer.SetWidth(m.frame.Main.W - 2)
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height())
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showDiff)
 	m.sidebar.SetSize(m.frame.Sidebar.W, m.frame.Sidebar.H)
+	m.diff.SetSize(m.frame.Diff.W, m.frame.Diff.H)
 	status := 0
 	if m.statusLine() != "" {
 		status = 1
@@ -442,20 +459,24 @@ func (m *Model) selectSession(id, task string) tea.Cmd {
 	m.draft = nil
 	m.picking = false
 	focus := m.setFocus(focusComposer)
+	diff := m.followDiff()
 	sess := m.store.Session(id)
 	if sess == nil || sess.Loaded || m.attaching[id] {
-		return focus
+		return tea.Batch(focus, diff)
 	}
 	m.attaching[id] = true
-	return tea.Batch(focus, m.send.SendCmd(protocol.AttachSession{SessionID: id}))
+	return tea.Batch(focus, diff, m.send.SendCmd(protocol.AttachSession{SessionID: id}))
 }
 
 func (m *Model) setFocus(f focus) tea.Cmd {
-	if !m.frame.HasSidebar && m.width > 0 {
+	if f == focusSidebar && !m.frame.HasSidebar && m.width > 0 {
+		f = focusComposer
+	}
+	if f == focusDiff && !m.diffOpen {
 		f = focusComposer
 	}
 	m.focus = f
-	if f == focusSidebar {
+	if f != focusComposer {
 		m.composer.Blur()
 		return nil
 	}
@@ -676,14 +697,19 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.picker.Update(msg, m.store.Models)
 	}
 
+	if m.focus == focusDiff && diffview.Handles(k) {
+		return m.diff.Key(msg)
+	}
+
 	switch k {
 	case "tab":
-		if m.focus == focusComposer {
-			return m.setFocus(focusSidebar)
-		}
-		return m.setFocus(focusComposer)
+		return m.setFocus(m.nextFocus())
+	case "ctrl+d":
+		return m.toggleDiff()
 	case "esc":
 		switch {
+		case m.focus == focusDiff:
+			return m.blurDiff()
 		case m.focus == focusSidebar:
 			return m.setFocus(focusComposer)
 		case m.draft != nil:
@@ -735,8 +761,11 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 
-	if m.focus == focusSidebar {
+	switch m.focus {
+	case focusSidebar:
 		return m.sidebar.Key(msg)
+	case focusDiff:
+		return nil
 	}
 	return m.composer.Update(msg)
 }
@@ -797,6 +826,12 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		return m.picker.Press(y, m.store.Models)
 	}
 	switch {
+	case f.HasDiff && f.Diff.Contains(msg.X, msg.Y):
+		x, y := f.Diff.Local(msg.X, msg.Y)
+		m.diff.Press(x, y)
+		return m.setFocus(focusDiff)
+	case f.HasDiff && f.DiffFull:
+		return nil
 	case f.HasSidebar && f.Divider.Contains(msg.X, msg.Y):
 		m.resizing = true
 	case f.HasSidebar && f.Sidebar.Contains(msg.X, msg.Y):
@@ -848,6 +883,10 @@ func (m *Model) wheel(msg tea.MouseWheelMsg) {
 	}
 	if m.frame.HasSidebar && m.frame.Sidebar.Contains(msg.X, msg.Y) {
 		m.sidebar.Scroll(delta)
+		return
+	}
+	if m.frame.HasDiff && m.frame.Diff.Contains(msg.X, msg.Y) {
+		m.diff.Scroll(delta)
 		return
 	}
 	if delta < 0 {
@@ -906,6 +945,9 @@ func (m Model) hint() string {
 	if m.focus == focusSidebar {
 		return "↑↓ move · enter open · n new chat · d delete · a archive · c clear project · ←→ fold · tab back"
 	}
+	if m.focus == focusDiff {
+		return "j/k scroll · n/p file · g fox or git · esc back to chat · ctrl+d close"
+	}
 	switch {
 	case m.draft != nil:
 		return "enter starts the side chat · esc cancels"
@@ -940,7 +982,7 @@ func (m Model) render() string {
 		return m.vault.View(m.store.Models, m.width, m.height)
 	}
 	f := m.frame
-	base := m.mainView()
+	base := m.withDiff(m.mainView())
 	if f.HasSidebar {
 		rule := th.Rule
 		if m.resizing {
@@ -1023,6 +1065,13 @@ func (m Model) header(width int) string {
 	right := ""
 	if sess != nil {
 		right = th.Muted.Render(usage(sess))
+	}
+	if n := m.changed[m.active]; sess != nil && n > 0 && !m.diffOpen {
+		note := th.Accent.Render(fmt.Sprintf("%d file%s changed", n, plural(n))) + th.Muted.Render(" · ctrl+d")
+		if right != "" {
+			note += th.Muted.Render(" · ")
+		}
+		right = note + right
 	}
 	if !m.connected {
 		right = th.Warn.Render("disconnected")
