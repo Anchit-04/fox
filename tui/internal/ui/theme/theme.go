@@ -21,6 +21,8 @@ type Palette struct {
 	UserBg     string
 	Code       string
 	Alert      string
+	Added      string
+	Removed    string
 }
 
 var Palettes = map[string]Palette{
@@ -36,6 +38,8 @@ var Palettes = map[string]Palette{
 		UserBg:     "#cfcec9",
 		Code:       "#7d5c1d",
 		Alert:      "#b23b2e",
+		Added:      "#2e6b34",
+		Removed:    "#a8342a",
 	},
 	"ochre": {
 		Background: "#1e1e1e",
@@ -49,6 +53,8 @@ var Palettes = map[string]Palette{
 		UserBg:     "#262626",
 		Code:       "#b4c0cc",
 		Alert:      "#d0614f",
+		Added:      "#86b36b",
+		Removed:    "#d0614f",
 	},
 }
 
@@ -83,6 +89,8 @@ type Theme struct {
 	Rule     lipgloss.Style
 	Code     lipgloss.Style
 	Warn     lipgloss.Style
+	Added    lipgloss.Style
+	Removed  lipgloss.Style
 }
 
 func New(name, background string) *Theme {
@@ -116,6 +124,8 @@ func New(name, background string) *Theme {
 	t.Rule = lipgloss.NewStyle().Foreground(t.Line)
 	t.Code = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Code))
 	t.Warn = lipgloss.NewStyle().Foreground(t.Alert)
+	t.Added = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Added))
+	t.Removed = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Removed))
 	return t
 }
 
