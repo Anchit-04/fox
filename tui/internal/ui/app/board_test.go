@@ -102,6 +102,23 @@ func TestTheBoardScrollsAndJumpsBetweenCards(t *testing.T) {
 	}
 }
 
+func TestTheBoardStaysWithTheChatThatDrew(t *testing.T) {
+	m, _ := activeChat(t, 160)
+	draw(t, m, map[string]any{"title": "x"}, "ok")
+	event(t, m, `{"session_id":"s2","seq":1,"type":"session_started","task":"t","workspace":"/w/shop"}`)
+	m.selectSession("s2", "")
+	m.sync()
+	if m.boardOpen || m.frame.HasSide {
+		t.Fatal("a chat with nothing drawn opened the board")
+	}
+	m.selectSession("s1", "")
+	m.update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+	m.selectSession("s1", "")
+	if !m.boardOpen {
+		t.Fatal("returning to a chat with cards closed its board")
+	}
+}
+
 func TestADrawingWhileTheDiffIsOpenOnlyFlashes(t *testing.T) {
 	m, _ := activeChat(t, 160)
 	ctrlD(m)
