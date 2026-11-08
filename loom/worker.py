@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import agent
+import baselines
 import memory
 import paths
 import permissions
@@ -68,6 +69,9 @@ class Session:
         self.journal = Journal(store, session_id)
 
     def handle_event(self, event_type: str, payload: dict) -> None:
+        if event_type == baselines.EVENT:
+            self.store.put_baseline(self.session_id, payload["path"], payload["existed"], payload["content"])
+            return
         if payload.get("task_id") is None:
             self.idle_since = time.monotonic() if event_type == "awaiting_input" else None
         seq = self.store.append_event(self.session_id, event_type, payload)

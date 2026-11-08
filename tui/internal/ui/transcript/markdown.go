@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"fox/tui/internal/ui/mermaid"
 	"fox/tui/internal/ui/theme"
 )
 
@@ -19,14 +20,55 @@ var (
 	linkRe    = regexp.MustCompile(`^\[([^\]]+)\]\(([^)\s]+)\)`)
 )
 
+func Markdown(th *theme.Theme, text string, width int) string {
+	return markdown(th, text, width)
+}
+
+func Diagram(th *theme.Theme, src string, width int, clip bool) []string {
+	drawn, err := mermaid.Render(src, width)
+	if err != nil {
+		lines := codeLines(th, strings.Split(src, "\n"), width)
+		return append(lines, th.Muted.Render(ansi.Truncate("(not drawn: "+err.Error()+")", width, "…")))
+	}
+	var out []string
+	for _, line := range strings.Split(drawn, "\n") {
+		if clip {
+			line = ansi.Truncate(line, width, "…")
+		}
+		out = append(out, th.Text.Render(line))
+	}
+	return out
+}
+
+func codeLines(th *theme.Theme, lines []string, width int) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		code := strings.ReplaceAll(line, "\t", "    ")
+		out = append(out, th.Rule.Render("│ ")+th.Code.Render(ansi.Truncate(code, width-2, "…")))
+	}
+	return out
+}
+
 func markdown(th *theme.Theme, text string, width int) string {
 	width = max(width, minWidth)
 	var out []string
-	inCode := false
+	inCode, inDiagram := false, false
+	var diagram []string
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
+			switch {
+			case !inCode && strings.EqualFold(strings.TrimSpace(trimmed[3:]), "mermaid"):
+				inDiagram, diagram = true, nil
+			case inDiagram:
+				out = append(out, Diagram(th, strings.Join(diagram, "\n"), width, true)...)
+				inDiagram = false
+			}
 			inCode = !inCode
+			continue
+		}
+		if inDiagram {
+			diagram = append(diagram, line)
 			continue
 		}
 		if inCode {
@@ -56,6 +98,9 @@ func markdown(th *theme.Theme, text string, width int) string {
 		default:
 			out = append(out, wrap(inline(th, trimmed, th.Text), width))
 		}
+	}
+	if inDiagram {
+		out = append(out, codeLines(th, diagram, width)...)
 	}
 	return strings.Join(out, "\n")
 }

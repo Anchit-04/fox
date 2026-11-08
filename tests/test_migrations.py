@@ -10,7 +10,7 @@ from orchestration.tasks import Lane, TaskStatus
 from store import migrations
 from store.migrations import MIGRATIONS, StoreError, migrate, version
 
-TABLES = {"sessions", "events", "tasks", "memory_entries", "model_calls", "blobs", "workers"}
+TABLES = {"sessions", "events", "tasks", "memory_entries", "model_calls", "blobs", "workers", "file_baselines"}
 
 
 def fresh() -> sqlite3.Connection:

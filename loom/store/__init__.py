@@ -178,6 +178,7 @@ class Store:
                 db.execute("DELETE FROM events WHERE session_id = ?", (current,))
                 db.execute("DELETE FROM tasks WHERE session_id = ?", (current,))
                 db.execute("DELETE FROM model_calls WHERE session_id = ?", (current,))
+                db.execute("DELETE FROM file_baselines WHERE session_id = ?", (current,))
                 db.execute("DELETE FROM workers WHERE root_id = ?", (current,))
                 db.execute("UPDATE memory_entries SET session_id = NULL WHERE session_id = ? AND space_id LIKE ?",
                            (current, PROJECT_SPACE + "%"))
@@ -210,6 +211,15 @@ class Store:
     def worker(self, root_id: str) -> dict | None:
         rows = self._query("SELECT * FROM workers WHERE root_id = ?", (root_id,))
         return rows[0] if rows else None
+
+    def put_baseline(self, session_id: str, path: str, existed: bool, content: str | None) -> None:
+        with self._write() as db:
+            db.execute("INSERT OR IGNORE INTO file_baselines (session_id, path, existed, content, taken_at) "
+                       "VALUES (?, ?, ?, ?, ?)", (session_id, path, int(existed), content, _now()))
+
+    def baselines(self, session_id: str) -> list[dict]:
+        return self._query("SELECT path, existed, content FROM file_baselines WHERE session_id = ? ORDER BY path",
+                           (session_id,))
 
     def put_blob(self, image: Image) -> str:
         blob = history_log.blob_id(image)

@@ -63,6 +63,11 @@ type CleanSessions struct {
 
 type ListProjects struct{}
 
+type FileDiff struct {
+	SessionID string `json:"session_id"`
+	Source    string `json:"source,omitempty"`
+}
+
 type SetModelKey struct {
 	ModelKey string `json:"model_key"`
 	Value    string `json:"value"`
@@ -80,6 +85,7 @@ func (ListProjects) Kind() string     { return "list_projects" }
 func (DeleteSession) Kind() string    { return "delete_session" }
 func (ArchiveSession) Kind() string   { return "archive_session" }
 func (CleanSessions) Kind() string    { return "clean_sessions" }
+func (FileDiff) Kind() string         { return "file_diff" }
 
 func Encode(c Command) ([]byte, error) {
 	body, err := json.Marshal(c)

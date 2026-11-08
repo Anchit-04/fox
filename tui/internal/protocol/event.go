@@ -38,6 +38,7 @@ const (
 	ArchiveSessionDone = "archive_session_done"
 	CleanPreview       = "clean_sessions_preview"
 	CleanDone          = "clean_sessions_done"
+	FileDiffs          = "file_diff"
 )
 
 type Event struct {

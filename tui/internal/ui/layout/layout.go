@@ -72,6 +72,11 @@ type Frame struct {
 	DropZone   Rect
 	Main       Rect
 	HasSidebar bool
+
+	Side        Rect
+	SideDivider Rect
+	HasSide     bool
+	SideFull    bool
 }
 
 const (
@@ -81,6 +86,7 @@ const (
 	minMain     = 40
 	dropZone    = 24
 	narrowWidth = 70
+	SplitWidth  = 100
 )
 
 func SidebarWidth(width, preferred int) int {
@@ -93,7 +99,7 @@ func SidebarWidth(width, preferred int) int {
 	return min(max(preferred, MinSidebar), max(width-minMain-1, MinSidebar))
 }
 
-func Compute(width, height, sidebarPreferred, composerHeight int) Frame {
+func Compute(width, height, sidebarPreferred, composerHeight int, side bool) Frame {
 	screen := Rect{W: width, H: height}
 	var f Frame
 	sidebarW := SidebarWidth(width, sidebarPreferred)
@@ -103,6 +109,15 @@ func Compute(width, height, sidebarPreferred, composerHeight int) Frame {
 		f.HasSidebar = true
 	} else {
 		f.Main = screen
+	}
+	if side {
+		f.HasSide = true
+		if f.Main.W >= SplitWidth {
+			cols := SplitH(f.Main, 0, 1, f.Main.W/2)
+			f.Main, f.SideDivider, f.Side = cols[0], cols[1], cols[2]
+		} else {
+			f.Side, f.SideFull = f.Main, true
+		}
 	}
 	rows := SplitV(f.Main, 1, 1, 0, composerHeight)
 	f.Header, f.Rule, f.Body, f.Composer = rows[0], rows[1], rows[2], rows[3]

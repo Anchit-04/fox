@@ -54,7 +54,7 @@ func (s *Store) Apply(ev protocol.Event) {
 		}
 		return
 	case protocol.DeleteSessionDone, protocol.CleanPreview, protocol.CleanDone, protocol.KillSessionDone,
-		protocol.HumanMessageQueued, protocol.EndSessionQueued:
+		protocol.HumanMessageQueued, protocol.EndSessionQueued, protocol.FileDiffs:
 		return
 	}
 

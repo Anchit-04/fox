@@ -17,6 +17,8 @@ from tools.file_tools import FILE_TOOLS, FILE_TOOL_HANDLERS
 from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 from tools import browser_tools, web
 from tools.web import WEB_TOOLS, WEB_TOOL_HANDLERS
+from tools.board_tool import BOARD_NOTE, BOARD_TOOLS, BOARD_TOOL_HANDLERS
+import baselines
 import git_context
 import paths
 import permissions
@@ -80,7 +82,7 @@ Rules:
 def build_system_prompt(model_key: str) -> str:
     """Fox identity + the tool/behaviour rules. Built per run rather than
     stored as a constant, since the identity block names the live model."""
-    return (IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE
+    return (IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE + BOARD_NOTE
             + git_context.prompt_note(paths.workspace()) + browser_tools.prompt_note(model_key))
 
 # --- Tool definitions --------------------------------------------------------
@@ -108,7 +110,7 @@ BASH_TOOL = {
     },
 }
 
-ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS + WEB_TOOLS
+ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS + WEB_TOOLS + BOARD_TOOLS
 
 
 # --- Tool execution -----------------------------------------------------------
@@ -134,6 +136,8 @@ def _execute(name: str, args: dict, model_key: str, todo_manager: TodoManager, m
         return TODO_TOOL_HANDLERS[name](todo_manager, args)
     if name in WEB_TOOL_HANDLERS:
         return WEB_TOOL_HANDLERS[name](args)
+    if name in BOARD_TOOL_HANDLERS:
+        return BOARD_TOOL_HANDLERS[name](args)
     if name in memory.MEMORY_TOOL_HANDLERS:
         return memory.MEMORY_TOOL_HANDLERS[name](mem, model_key, args)
     return json.dumps({"error": f"Unknown tool: {name}"})
@@ -141,7 +145,7 @@ def _execute(name: str, args: dict, model_key: str, todo_manager: TodoManager, m
 
 def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
     return (name == "run_bash_command" or name in FILE_TOOL_HANDLERS or name in TODO_TOOL_HANDLERS
-            or name in memory.MEMORY_TOOL_HANDLERS or name in WEB_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
+            or name in memory.MEMORY_TOOL_HANDLERS or name in WEB_TOOL_HANDLERS or name in BOARD_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
 
 
 def _claimed_by_another(tc, claims, task_id: str | None) -> str | None:
@@ -177,6 +181,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         return refusal
     decision = permissions.classify(tc.name, args, mode)
     if decision.action == permissions.ALLOW:
+        baselines.capture(event_sink, task_id, tc.name, args)
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
     if decision.action == permissions.DENY:
         # Refused by the session's mode, not by a person — say so,
@@ -200,6 +205,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
         # re-asking, and each new path still gets granted here.
         if tc.name in permissions.PATH_TOOLS and args.get("path"):
             file_tools.allow_path(args["path"])
+        baselines.capture(event_sink, task_id, tc.name, args)
         return execute_tool(tc.name, args, model_key, todo_manager, mem, extra_handlers)
     if verbose:
         print("\033[91mDenied.\033[0m")

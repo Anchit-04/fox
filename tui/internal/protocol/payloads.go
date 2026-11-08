@@ -47,6 +47,21 @@ type ToolResultPayload struct {
 	Content string `json:"content"`
 }
 
+type DiffFile struct {
+	Path    string `json:"path"`
+	Status  string `json:"status"`
+	Added   int    `json:"added"`
+	Removed int    `json:"removed"`
+	Diff    string `json:"diff"`
+	Note    string `json:"note"`
+}
+
+type FileDiffPayload struct {
+	Source string     `json:"source"`
+	Files  []DiffFile `json:"files"`
+	Note   string     `json:"note"`
+}
+
 type ToolDeniedPayload struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
