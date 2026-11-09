@@ -10,24 +10,25 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 type Request struct {
 	ID      string `json:"id"`
+	Op      string `json:"op"`
 	Command string `json:"command"`
+	Process string `json:"process"`
 }
 
 type Response struct {
 	ID       string `json:"id"`
 	ExitCode int    `json:"exit_code"`
 	Output   string `json:"output"`
+	Process  string `json:"process,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 const MaxCapturedOutputBytes = 2 * 1024 * 1024 // 2MB
@@ -80,14 +81,20 @@ func (r *responder) send(resp Response) {
 	r.out.Write(append(data, '\n'))
 }
 
-func serve(in io.Reader, out io.Writer) {
+func serve(in io.Reader, out io.Writer) error {
+	sess, err := newSession()
+	if err != nil {
+		return err
+	}
+	defer sess.close()
+
 	reader := bufio.NewReader(in)
 	replies := &responder{out: out}
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return
+			return nil
 		}
 
 		var req Request
@@ -97,7 +104,7 @@ func serve(in io.Reader, out io.Writer) {
 		}
 
 		go func(req Request) {
-			resp := runContained(req.Command, DefaultTimeout, DefaultMemoryLimitMB)
+			resp := sess.handle(req)
 			resp.ID = req.ID
 			replies.send(resp)
 		}(req)
@@ -105,7 +112,10 @@ func serve(in io.Reader, out io.Writer) {
 }
 
 func main() {
-	serve(os.Stdin, os.Stdout)
+	if err := serve(os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "sandboxd: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 const (
@@ -113,72 +123,29 @@ const (
 	DefaultMemoryLimitMB int64 = 512
 )
 
-func runContained(command string, timeout time.Duration, memoryLimitMB int64) Response {
-
-	cmd := exec.Command("cmd")
-	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `/C ` + command}
-
+func runContained(command string, timeout time.Duration, parent windows.Handle, memoryLimitMB int64) Response {
 	buf := &limitedWriter{limit: MaxCapturedOutputBytes}
-	cmd.Stdout = buf
-	cmd.Stderr = buf
-
-	if err := cmd.Start(); err != nil {
-		return Response{ExitCode: -1, Output: fmt.Sprintf("failed to start command: %v", err)}
-	}
-
-	job, err := windows.CreateJobObject(nil, nil)
+	proc, err := startContained(command, buf, parent, memoryLimitMB)
 	if err != nil {
-		return Response{ExitCode: -1, Output: fmt.Sprintf("failed to create job object: %v", err)}
+		return Response{ExitCode: -1, Output: err.Error()}
 	}
-	defer windows.CloseHandle(job)
-
-	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags: windows.JOB_OBJECT_LIMIT_JOB_MEMORY | windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-		},
-		JobMemoryLimit: uintptr(memoryLimitMB * 1024 * 1024),
-	}
-	_, err = windows.SetInformationJobObject(
-		job,
-		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)),
-		uint32(unsafe.Sizeof(info)),
-	)
-	if err != nil {
-		return Response{ExitCode: -1, Output: fmt.Sprintf("failed to configure job object: %v", err)}
-	}
-
-	processHandle, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false,
-		uint32(cmd.Process.Pid),
-	)
-	if err != nil {
-		return Response{ExitCode: -1, Output: fmt.Sprintf("failed to open process handle: %v", err)}
-	}
-	defer windows.CloseHandle(processHandle)
-
-	if err := windows.AssignProcessToJobObject(job, processHandle); err != nil {
-		return Response{ExitCode: -1, Output: fmt.Sprintf("failed to assign process to job: %v", err)}
-	}
+	defer windows.CloseHandle(proc.job)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- cmd.Wait()
+		done <- proc.cmd.Wait()
 	}()
 
 	select {
 	case err := <-done:
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				return Response{ExitCode: exitErr.ExitCode(), Output: buf.String()}
-			}
+		code := exitCode(err)
+		if code == -1 {
 			return Response{ExitCode: -1, Output: fmt.Sprintf("wait failed: %v", err)}
 		}
-		return Response{ExitCode: 0, Output: buf.String()}
+		return Response{ExitCode: code, Output: buf.String()}
 
 	case <-time.After(timeout):
-		windows.TerminateJobObject(job, 1)
+		windows.TerminateJobObject(proc.job, 1)
 		return Response{
 			ExitCode: -1,
 			Output:   fmt.Sprintf("command timed out after %v; output so far:\n%s", timeout, buf.String()),
