@@ -15,6 +15,7 @@ import json
 import queue
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 
 import git_context
@@ -40,9 +41,6 @@ SHELL_NOTE = f"""Shell:
 CLIENT_READ_TIMEOUT = COMMAND_TIMEOUT_SECONDS + 15
 
 _SANDBOXD_PATH = Path(__file__).parent / "sandboxd" / "sandboxd.exe"
-
-_proc: subprocess.Popen | None = None
-
 
 def _start() -> subprocess.Popen:
     if not _SANDBOXD_PATH.exists():
@@ -88,86 +86,95 @@ def _stop(proc: subprocess.Popen) -> None:
         pass
 
 
+class _Daemon:
+    def __init__(self, proc: subprocess.Popen):
+        self.proc = proc
+        self.pending: dict[str, queue.Queue] = {}
+        self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
+        self.dead: str | None = None
+        threading.Thread(target=self._read, daemon=True, name="sandboxd-reader").start()
+
+    def alive(self) -> bool:
+        return self.dead is None and self.proc.poll() is None
+
+    def _read(self) -> None:
+        try:
+            for line in self.proc.stdout:
+                try:
+                    resp = json.loads(line)
+                except json.JSONDecodeError:
+                    self._fail(f"sandboxd sent a malformed response: {line!r}")
+                    self.proc.kill()
+                    return
+                with self.lock:
+                    waiter = self.pending.pop(resp.pop("id", ""), None)
+                if waiter is not None:
+                    waiter.put(resp)
+        except (OSError, ValueError):
+            pass
+        self._fail("sandboxd process died unexpectedly")
+
+    def _fail(self, reason: str) -> None:
+        with self.lock:
+            self.dead = self.dead or reason
+            waiters, self.pending = self.pending, {}
+        for waiter in waiters.values():
+            waiter.put({"exit_code": -1, "output": reason})
+
+    def call(self, command: str, timeout: float) -> dict:
+        request_id = uuid.uuid4().hex
+        waiter: queue.Queue = queue.Queue(maxsize=1)
+        with self.lock:
+            if self.dead is not None:
+                return {"exit_code": -1, "output": self.dead}
+            self.pending[request_id] = waiter
+        try:
+            with self.write_lock:
+                self.proc.stdin.write(json.dumps({"id": request_id, "command": command}) + "\n")
+                self.proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as e:
+            with self.lock:
+                self.pending.pop(request_id, None)
+            return {"exit_code": -1, "output": f"sandboxd pipe error: {e}"}
+        try:
+            return waiter.get(timeout=timeout)
+        except queue.Empty:
+            with self.lock:
+                self.pending.pop(request_id, None)
+            self._fail(f"sandboxd did not answer a command within {timeout}s and was restarted")
+            self.proc.kill()
+            return {"exit_code": -1, "output": f"sandboxd did not respond within {timeout}s "
+                                               "— killed the hung process; it will restart on the next command."}
+
+
+_daemon: _Daemon | None = None
+_daemon_lock = threading.Lock()
+
+
 def _cleanup_at_exit() -> None:
-    """Registered once for the process lifetime — always closes over whatever
-    _proc currently is, so a mid-session restart doesn't leak old handlers."""
-    if _proc is not None:
-        _stop(_proc)
+    if _daemon is not None:
+        _stop(_daemon.proc)
 
 
 atexit.register(_cleanup_at_exit)
 
 
-def _get_proc() -> subprocess.Popen:
-    global _proc
-    if _proc is None or _proc.poll() is not None:
-        _proc = _start()  # not started yet, or died since last call
-    return _proc
-
-
-def _readline_with_timeout(proc: subprocess.Popen, timeout: float) -> str | None:
-    """proc.stdout.readline() can't be timed out directly on Windows pipes,
-    so read on a daemon thread and wait on a Queue instead. Returns the line,
-    "" on clean EOF, or None if we gave up waiting."""
-    q: queue.Queue = queue.Queue(maxsize=1)
-
-    def _reader():
-        try:
-            q.put(proc.stdout.readline())
-        except Exception:
-            q.put("")
-
-    threading.Thread(target=_reader, daemon=True).start()
-    try:
-        return q.get(timeout=timeout)
-    except queue.Empty:
-        return None
+def _get_daemon() -> _Daemon:
+    global _daemon
+    with _daemon_lock:
+        if _daemon is None or not _daemon.alive():
+            _daemon = _Daemon(_start())
+        return _daemon
 
 
 def run_bash_command(command: str) -> str:
-    """Execute a shell command inside sandboxd's containment. Returns
-    {"exit_code": int, "output": str} as a JSON string — same shape the
-    old subprocess-based implementation returned, so callers didn't change.
-    Per-command timeout/memory overrides aren't wired through yet."""
-    global _proc
-
     try:
-        proc = _get_proc()
+        daemon = _get_daemon()
     except RuntimeError as e:
-        # sandboxd.exe isn't built yet — expected on a fresh checkout.
         return json.dumps({"exit_code": -1, "output": str(e)})
 
-    try:
-        proc.stdin.write(json.dumps({"command": command}) + "\n")
-        proc.stdin.flush()
-        line = _readline_with_timeout(proc, CLIENT_READ_TIMEOUT)
-    except (BrokenPipeError, OSError) as e:
-        return json.dumps({"exit_code": -1, "output": f"sandboxd pipe error: {e}"})
-
-    if line is None:
-        # Hung — sandboxd's own 30s timeout should've answered by now. Kill
-        # it and don't reuse it; the next call gets a fresh one.
-        proc.kill()
-        _proc = None
-        return json.dumps({
-            "exit_code": -1,
-            "output": f"sandboxd did not respond within {CLIENT_READ_TIMEOUT}s "
-                      "— killed the hung process; it will restart on the next command.",
-        })
-
-    if not line:
-        # Exited unexpectedly. Don't auto-retry — the command might not be idempotent.
-        _proc = None
-        return json.dumps({"exit_code": -1, "output": "sandboxd process died unexpectedly"})
-
-    try:
-        resp = json.loads(line)
-    except json.JSONDecodeError:
-        # Malformed line, likely killed mid-write — framing may be out of
-        # sync now, so don't trust this process for the next call either.
-        _proc = None
-        return json.dumps({"exit_code": -1, "output": f"sandboxd sent a malformed response: {line!r}"})
-
+    resp = daemon.call(command, CLIENT_READ_TIMEOUT)
     output = resp.get("output", "")
     if len(output) > MAX_OUTPUT_CHARS:
         resp["output"] = output[:MAX_OUTPUT_CHARS] + f"\n... [truncated, {len(output)} chars total]"
