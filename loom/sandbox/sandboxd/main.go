@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -18,10 +20,12 @@ import (
 )
 
 type Request struct {
+	ID      string `json:"id"`
 	Command string `json:"command"`
 }
 
 type Response struct {
+	ID       string `json:"id"`
 	ExitCode int    `json:"exit_code"`
 	Output   string `json:"output"`
 }
@@ -29,12 +33,15 @@ type Response struct {
 const MaxCapturedOutputBytes = 2 * 1024 * 1024 // 2MB
 
 type limitedWriter struct {
+	mu        sync.Mutex
 	buf       bytes.Buffer
 	limit     int
 	truncated bool
 }
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	remaining := w.limit - w.buf.Len()
 	if remaining <= 0 {
 		w.truncated = true
@@ -49,6 +56,8 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func (w *limitedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	s := w.buf.String()
 	if w.truncated {
 		s += fmt.Sprintf("\n... [output truncated at sandboxd's %dMB buffer cap]", MaxCapturedOutputBytes/(1024*1024))
@@ -56,8 +65,24 @@ func (w *limitedWriter) String() string {
 	return s
 }
 
-func main() {
-	reader := bufio.NewReader(os.Stdin)
+type responder struct {
+	mu  sync.Mutex
+	out io.Writer
+}
+
+func (r *responder) send(resp Response) {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		data = []byte(fmt.Sprintf(`{"id":%q,"exit_code":-1,"output":"internal error marshaling response"}`, resp.ID))
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.out.Write(append(data, '\n'))
+}
+
+func serve(in io.Reader, out io.Writer) {
+	reader := bufio.NewReader(in)
+	replies := &responder{out: out}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -67,13 +92,20 @@ func main() {
 
 		var req Request
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			writeResponse(Response{ExitCode: -1, Output: fmt.Sprintf("bad request JSON: %v", err)})
+			replies.send(Response{ExitCode: -1, Output: fmt.Sprintf("bad request JSON: %v", err)})
 			continue
 		}
 
-		resp := runContained(req.Command, DefaultTimeout, DefaultMemoryLimitMB)
-		writeResponse(resp)
+		go func(req Request) {
+			resp := runContained(req.Command, DefaultTimeout, DefaultMemoryLimitMB)
+			resp.ID = req.ID
+			replies.send(resp)
+		}(req)
 	}
+}
+
+func main() {
+	serve(os.Stdin, os.Stdout)
 }
 
 const (
@@ -152,13 +184,4 @@ func runContained(command string, timeout time.Duration, memoryLimitMB int64) Re
 			Output:   fmt.Sprintf("command timed out after %v; output so far:\n%s", timeout, buf.String()),
 		}
 	}
-}
-
-func writeResponse(resp Response) {
-	data, err := json.Marshal(resp)
-	if err != nil {
-		fmt.Fprintf(os.Stdout, `{"exit_code":-1,"output":"internal error marshaling response: %v"}`+"\n", err)
-		return
-	}
-	fmt.Println(string(data))
 }
