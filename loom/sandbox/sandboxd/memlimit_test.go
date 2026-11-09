@@ -14,7 +14,7 @@ func TestRunContained_MemoryLimitKillsProcess(t *testing.T) {
 	cmd := `powershell -NoProfile -Command "$a = New-Object byte[] (700*1MB); for ($i=0; $i -lt $a.Length; $i += 4096) { $a[$i] = 1 }; Start-Sleep -Seconds 10"`
 
 	start := time.Now()
-	resp := runContained(cmd, 15*time.Second, 100)
+	resp := runContained(cmd, 15*time.Second, 0, 100)
 	elapsed := time.Since(start)
 
 	if elapsed >= 15*time.Second {

@@ -18,7 +18,7 @@ func TestRunContained_TimeoutKillsProcessTree(t *testing.T) {
 	cmd := `for /L %i in (1,1,20) do (echo %i>>` + counter + ` & ping -n 2 127.0.0.1 >nul)`
 
 	start := time.Now()
-	resp := runContained(cmd, 2*time.Second, 512)
+	resp := runContained(cmd, 2*time.Second, 0, 512)
 	elapsed := time.Since(start)
 
 	if resp.ExitCode != -1 {
