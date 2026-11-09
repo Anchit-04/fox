@@ -42,6 +42,29 @@ class RequestTimeout(unittest.TestCase):
         self.assertEqual(p._client.timeout, REQUEST_TIMEOUT_SECONDS)
 
 
+class GeminiEmptyReply(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"FAKE_KEY": "k"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def generate_with(self, response):
+        provider = GeminiProvider("m", "FAKE_KEY")
+        with mock.patch.object(provider, "_generate_with_retry", return_value=response):
+            return provider.generate([Turn(role="user", text="hi")], [], "system")
+
+    def test_a_candidate_with_no_parts_is_an_empty_reply(self):
+        response = SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=None))], text=None,
+                                   usage_metadata=None)
+        result = self.generate_with(response)
+        self.assertEqual(result.tool_calls, [])
+        self.assertFalse(result.text)
+
+    def test_a_candidate_with_no_content_is_an_empty_reply(self):
+        response = SimpleNamespace(candidates=[SimpleNamespace(content=None)], text=None, usage_metadata=None)
+        self.assertEqual(self.generate_with(response).tool_calls, [])
+
+
 class EmptyCompletion(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {"FAKE_KEY": "k"})

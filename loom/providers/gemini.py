@@ -37,7 +37,8 @@ class GeminiProvider(Provider):
 
         # Walk the raw parts, not response.function_calls, so we can carry each
         # call's thought_signature along — Gemini 3 rejects a resent call missing it.
-        parts = response.candidates[0].content.parts if response.candidates else []
+        content = response.candidates[0].content if response.candidates else None
+        parts = (content.parts if content is not None else None) or []
         fc_parts = [p for p in parts if p.function_call is not None]
         # Gemini doesn't hand back call ids — synthesize positional ones so
         # ToolResult.call_id has something stable to reference within a turn.
