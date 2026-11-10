@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"fox/tui/internal/state"
 	"fox/tui/internal/ui/theme"
@@ -533,8 +534,8 @@ func taskLabel(t *state.Task) string {
 	if len(t.Scope) > 0 {
 		return t.Scope[0]
 	}
-	if t.Description != "" {
-		return t.Description
+	if first, _, _ := strings.Cut(strings.TrimSpace(t.Description), "\n"); first != "" {
+		return first
 	}
 	return t.ID
 }
@@ -562,14 +563,7 @@ func spread(left, right string, width int) string {
 }
 
 func fit(s string, width int) string {
-	if lipgloss.Width(s) <= width {
-		return s
-	}
-	runes := []rune(s)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "…"
+	return ansi.Truncate(s, width, "…")
 }
 
 func emit(msg tea.Msg) tea.Cmd {

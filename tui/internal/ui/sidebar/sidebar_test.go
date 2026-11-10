@@ -3,6 +3,7 @@ package sidebar
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -134,5 +135,48 @@ func TestDeleteArchiveAndCleanKeys(t *testing.T) {
 	}
 	if _, ok := run(m.Key(key("A"))).(ToggleArchivedMsg); !ok {
 		t.Fatal("A should toggle archived chats")
+	}
+}
+
+func TestFitCutsALabelToItsWidth(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"short", 10, "short"},
+		{"hello world", 8, "hello w…"},
+		{"hello", 1, "…"},
+	}
+	for _, c := range cases {
+		if got := fit(c.in, c.width); got != c.want {
+			t.Errorf("fit(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
+		}
+	}
+	wide := fit("日本語のテキスト", 5)
+	if ansi.StringWidth(wide) > 5 || !strings.HasSuffix(wide, "…") {
+		t.Errorf("fit on wide characters = %q (width %d), want at most 5 columns ending in …", wide, ansi.StringWidth(wide))
+	}
+}
+
+func TestFitIsFastOnAHugeLabel(t *testing.T) {
+	huge := strings.Repeat("a", 100_000)
+	start := time.Now()
+	got := fit(huge, 30)
+	if took := time.Since(start); took > 50*time.Millisecond {
+		t.Fatalf("fit took %v on a 100,000-character label", took)
+	}
+	if ansi.StringWidth(got) != 30 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("fit returned %d columns, want 30 ending in …", ansi.StringWidth(got))
+	}
+}
+
+func TestATaskRowShowsOnlyTheFirstLineOfItsDescription(t *testing.T) {
+	task := &state.Task{ID: "t1", Description: "\n  Explain AQR HNSW.\nCONTEXT: a very long brief…"}
+	if got := taskLabel(task); got != "Explain AQR HNSW." {
+		t.Fatalf("taskLabel = %q", got)
+	}
+	if got := taskLabel(&state.Task{ID: "t2"}); got != "t2" {
+		t.Fatalf("taskLabel with no description = %q", got)
 	}
 }
