@@ -59,7 +59,7 @@ class DispatchTests(unittest.TestCase):
         self.inbox = TaskInbox()
         self.agent = FakeAgent()
         self.patch(dispatch, "run_agent", self.agent)
-        self.patch(dispatch.routing, "pick_executor", lambda preferred=None: "fake-model")
+        self.patch(dispatch.routing, "pick_executor", lambda preferred=None, fallback=None: "fake-model")
 
     def patch(self, target, name, value):
         patcher = mock.patch.object(target, name, value)
@@ -164,7 +164,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.agent.calls, [])
 
     def test_missing_model_fails_before_running(self):
-        def no_model(preferred=None):
+        def no_model(preferred=None, fallback=None):
             raise routing.RoutingError("no key for kimi-k2")
         self.patch(dispatch.routing, "pick_executor", no_model)
         [t] = self.run_all(Lane.READ)

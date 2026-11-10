@@ -51,7 +51,7 @@ class AgentCompaction(unittest.TestCase):
 
     def run_with(self, model):
         with mock.patch.object(agent, "get_provider", return_value=model):
-            agent.run_agent("task", verbose=False, interactive=False, mem=self.mem)
+            agent.run_agent("task", model_key="fake-model", verbose=False, interactive=False, mem=self.mem)
 
     def test_one_read_per_turn_keeps_everything_it_read(self):
         model = Recorder([read_step(i) for i in range(15)])

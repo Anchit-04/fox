@@ -18,6 +18,7 @@ from tools.todo_tool import TODO_TOOLS, TODO_TOOL_HANDLERS, TodoManager
 from tools import browser_tools, web
 from tools.web import WEB_TOOLS, WEB_TOOL_HANDLERS
 from tools.board_tool import BOARD_NOTE, BOARD_TOOLS, BOARD_TOOL_HANDLERS
+from tools.process_tools import PROCESS_TOOLS, PROCESS_TOOL_HANDLERS
 import baselines
 import git_context
 import paths
@@ -31,8 +32,7 @@ import memory
 from events import EventSink, emit
 from history import History
 from calls import generate_or_pause
-
-MODEL_KEY = "gemini-flash"          # default entry in providers/config.py's MODEL_REGISTRY
+from config import routing
 
 # WORKDIR is set in three separate places right now (not here) —
 # sandbox_client.py and file_tools.py each have their own. Should centralize.
@@ -64,6 +64,8 @@ SYSTEM_PROMPT_BASE = """You have access to:
   ls/dir/find, which behave differently across OSes.
 - run_bash_command — for anything else (running tests, git, installing packages).
   It runs Windows cmd.exe; see Shell below.
+- start_process, read_process, stop_process — for commands that keep running
+  (dev servers, watchers, recorders).
 
 """ + SHELL_NOTE + """
 Rules:
@@ -110,7 +112,7 @@ BASH_TOOL = {
     },
 }
 
-ALL_TOOLS = [BASH_TOOL] + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS + WEB_TOOLS + BOARD_TOOLS
+ALL_TOOLS = [BASH_TOOL] + PROCESS_TOOLS + FILE_TOOLS + TODO_TOOLS + memory.MEMORY_TOOLS + WEB_TOOLS + BOARD_TOOLS
 
 
 # --- Tool execution -----------------------------------------------------------
@@ -130,6 +132,8 @@ def _execute(name: str, args: dict, model_key: str, todo_manager: TodoManager, m
         return extra_handlers[name](args)
     if name == "run_bash_command":
         return run_bash_command(args["command"])
+    if name in PROCESS_TOOL_HANDLERS:
+        return PROCESS_TOOL_HANDLERS[name](args)
     if name in FILE_TOOL_HANDLERS:
         return FILE_TOOL_HANDLERS[name](args)
     if name in TODO_TOOL_HANDLERS:
@@ -144,7 +148,8 @@ def _execute(name: str, args: dict, model_key: str, todo_manager: TodoManager, m
 
 
 def _is_known_tool(name: str, extra_handlers: dict | None) -> bool:
-    return (name == "run_bash_command" or name in FILE_TOOL_HANDLERS or name in TODO_TOOL_HANDLERS
+    return (name == "run_bash_command" or name in PROCESS_TOOL_HANDLERS or name in FILE_TOOL_HANDLERS
+            or name in TODO_TOOL_HANDLERS
             or name in memory.MEMORY_TOOL_HANDLERS or name in WEB_TOOL_HANDLERS or name in BOARD_TOOL_HANDLERS or bool(extra_handlers and name in extra_handlers))
 
 
@@ -219,7 +224,7 @@ def run_tool_call(tc, *, mode: str, approver, model_key: str, todo_manager: Todo
 
 # --- The agent loop -----------------------------------------------------------
 
-def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, interactive: bool = True,
+def run_agent(task: str, verbose: bool = True, model_key: str | None = None, interactive: bool = True,
               task_id: str | None = None, event_sink: "EventSink | None" = None,
               mem: "memory.Memory | None" = None, injection_queue=None, keep_alive: bool = False,
               mode: str = permissions.WORKSPACE_WRITE, approver=None,
@@ -241,6 +246,7 @@ def run_agent(task: str, verbose: bool = True, model_key: str = MODEL_KEY, inter
     for a live top-level chat session only — never set it for a delegated
     executor task, or it'll block forever waiting for input nobody's going to
     send, and the orchestrator with it: it waits for every running task."""
+    model_key = model_key or routing.pick_chat()
     provider = get_provider(model_key)
     # Start from no grants, whatever happened on this thread before. Clearing
     # only on the way out would miss a run that raised, and two sequential
@@ -386,8 +392,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run one Fox agent from the terminal.")
     parser.add_argument("task", help="What the agent should do.")
-    parser.add_argument("model_key", nargs="?", default=MODEL_KEY,
-                        help=f"Model registry key (default: {MODEL_KEY}).")
+    parser.add_argument("model_key", nargs="?", default=None,
+                        help="Model registry key (default: default_chat in roster.json).")
     parser.add_argument("--workspace", default=None,
                         help="Directory the agent may read and write. Defaults to the "
                              "current directory.")

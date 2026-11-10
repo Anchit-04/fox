@@ -5,9 +5,9 @@ refers to models only by the short key below, never SDK type or raw model id.
 To add one: pick a key, point it at a provider module (a key of
 PROVIDER_CLASSES) + real model id, name the env var holding its key
 (actual key goes in .env, never here). Not
-Gemini/Anthropic? It's almost certainly OpenAI-compatible. "tier" is pure
-routing metadata, not a constructor arg — must be popped in get_provider()
-below or every call breaks with an unexpected-kwarg TypeError.
+Gemini/Anthropic? It's almost certainly OpenAI-compatible. "price" and
+"vision" are catalog metadata, not constructor args — they must be popped in
+get_provider() below or every call breaks with an unexpected-kwarg TypeError.
 """
 
 from importlib import import_module
@@ -28,7 +28,6 @@ MODEL_REGISTRY = {
         "model_id": "claude-opus-5-5",
         "price": {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
         "env_key": "ANTHROPIC_API_KEY",
-        "tier": "strong",
         "vision": True,
     },
     "claude-haiku": {
@@ -38,7 +37,6 @@ MODEL_REGISTRY = {
                   "long_context": {"over": 100_000, "input": 0.50, "output": 2.50, "cache_read": 0.05,
                                    "cache_write": 0.625}},
         "env_key": "ANTHROPIC_API_KEY",
-        "tier": "cheap",
         "vision": True,
     },
     "gemini-lite": {
@@ -46,7 +44,6 @@ MODEL_REGISTRY = {
         "model_id": "gemini-3.1-flash-lite",
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
-        "tier": "cheap",
         "vision": True,
     },
     "gemini-flash": {
@@ -54,7 +51,6 @@ MODEL_REGISTRY = {
         "model_id": "gemini-3.8-flash",  # was 3.6-flash — that id started returning 503 "high demand"; 3.8 is current-gen and on the same key
         "price": FREE,
         "env_key": "GEMINI_API_KEY",
-        "tier": "cheap",
         "vision": True,
     },
     "deepseek-chat": {
@@ -63,7 +59,6 @@ MODEL_REGISTRY = {
         "price": None,
         "env_key": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com",
-        "tier": "cheap",
         "vision": False,
     },
     "kimi-k2": {
@@ -72,7 +67,6 @@ MODEL_REGISTRY = {
         "price": None,
         "env_key": "MOONSHOT_API_KEY",
         "base_url": "https://api.moonshot.ai/v1",
-        "tier": "cheap",
         "vision": False,
     },
     # OpenRouter — one key, many models. These point at :free variants
@@ -89,7 +83,6 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
-        "tier": "cheap",
         "vision": False,
     },
     # Fastest verified free model — ~1.7s to first tool call, which is what
@@ -100,7 +93,6 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
-        "tier": "cheap",
         "vision": True,
     },
     # 1M context — the one to reach for when a task reads a lot of files.
@@ -111,7 +103,6 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
-        "tier": "cheap",
         "vision": False,
     },
     "nemotron-ultra": {
@@ -120,7 +111,6 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
-        "tier": "strong",
         "vision": False,
     },
     "nemotron-super": {
@@ -129,7 +119,6 @@ MODEL_REGISTRY = {
         "price": FREE,
         "env_key": "OPENROUTER_API_KEY",
         "base_url": "https://openrouter.ai/api/v1",
-        "tier": "strong",
         "vision": True,
     },
 }
@@ -147,7 +136,6 @@ def get_provider(key: str):
     cfg = dict(MODEL_REGISTRY[key])
     provider_cls = provider_class(cfg.pop("provider"))
     model_id = cfg.pop("model_id")
-    cfg.pop("tier", None)  # routing/vault metadata, not a Provider constructor arg
     cfg.pop("price", None)
     cfg.pop("vision", None)
     return provider_cls(model_id=model_id, **cfg)
@@ -157,11 +145,13 @@ def has_vision(key: str) -> bool:
     return bool(MODEL_REGISTRY.get(key, {}).get("vision"))
 
 
-def get_tier(key: str) -> str:
-    """The routing tier for a registry key."""
-    if key not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model key {key!r}. Known: {sorted(MODEL_REGISTRY)}")
-    return MODEL_REGISTRY[key]["tier"]
+def price_text(key: str) -> str:
+    price = MODEL_REGISTRY.get(key, {}).get("price")
+    if price is None:
+        return "price unknown"
+    if price["input"] == 0 and price["output"] == 0:
+        return "free"
+    return f"${price['input']:g} in / ${price['output']:g} out per M tokens"
 
 
 def cost_of(key: str, usage: Usage) -> float | None:

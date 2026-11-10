@@ -166,7 +166,7 @@ class RunAgentHooks(unittest.TestCase):
     def run_with(self, script, **kwargs):
         fake = FakeProvider(script)
         with mock.patch.object(agent, "get_provider", return_value=fake):
-            text = agent.run_agent("task", verbose=False, interactive=False, mem=self.mem, **kwargs)
+            text = agent.run_agent("task", model_key="fake-model", verbose=False, interactive=False, mem=self.mem, **kwargs)
         return fake, text
 
     def test_default_tools_unchanged(self):
@@ -210,7 +210,7 @@ class RunAgentHooks(unittest.TestCase):
         original = fake.generate
         fake.generate = lambda history, tools, prompt: (seen.append(list(history)), original(history, tools, prompt))[1]
         with mock.patch.object(agent, "get_provider", return_value=fake):
-            agent.run_agent("task", verbose=False, interactive=False, mem=self.mem)
+            agent.run_agent("task", model_key="fake-model", verbose=False, interactive=False, mem=self.mem)
         self.assertEqual(seen[1][1].raw, ["provider-blocks"])
 
     def test_unknown_tool_is_rejected_without_asking_anyone(self):

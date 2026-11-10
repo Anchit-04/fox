@@ -9,7 +9,7 @@ from agent import ALL_TOOLS, IDENTITY, restore_todos, run_tool_call
 from events import emit
 from approval import DenyApprover
 from calls import generate_or_pause
-from config import preferences, routing
+from config import roster, routing
 import context
 from context import MAX_ITERATIONS, build_compact_input
 from history import History
@@ -80,7 +80,8 @@ def delegate_tool(session_mode: str) -> dict:
                 },
                 "model_key": {
                     "type": "string",
-                    "description": "Optional. A specific executor model, if one is listed under executor specialties.",
+                    "description": ("Optional. A name from 'Workers you can delegate to'. Leave it out to "
+                                    "use the default worker."),
                 },
             },
             "required": ["description", "lane", "scope"],
@@ -190,7 +191,7 @@ def _system_prompt(run: _Run) -> str:
     parts.append(board_tool.BOARD_NOTE)
     parts.append(git_context.prompt_note(paths.workspace()))
     parts.append(browser_tools.prompt_note(run.model_key))
-    parts.append("\n## Executor specialties\n" + preferences.render_for_prompt())
+    parts.append(roster.render_for_prompt(roster.load(), routing.default_worker(run.model_key)))
     return "".join(parts)
 
 
@@ -220,7 +221,7 @@ def _delegate(tc, run: _Run) -> str:
     run.running[task.id] = task
     taken = start_task(task, run.mode, claims=run.claims, inbox=run.inbox, mem=run.mem,
                        event_sink=run.event_sink, injection_queue=run.injection_queue, approver=run.approver,
-                       journal=run.journal)
+                       journal=run.journal, default_model=run.model_key)
     if taken:
         del run.running[task.id]
         return json.dumps({"error": f"{task.id} not started: {', '.join(taken)} already claimed by a running "
@@ -249,7 +250,7 @@ def reopen(run: _Run, task_id: str, message: str) -> str | None:
         return f"{task_id} is still running; your message was queued for it instead"
     taken = continue_task(task, message, run.mode, claims=run.claims, inbox=run.inbox, mem=run.mem,
                           journal=run.journal, event_sink=run.event_sink, injection_queue=run.injection_queue,
-                          approver=run.approver)
+                          approver=run.approver, default_model=run.model_key)
     if taken:
         return f"{task_id} cannot continue: {', '.join(taken)} is claimed by a running task"
     run.running[task.id] = task
@@ -313,7 +314,7 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
                      wait_first: bool = False, on_reopen=None) -> str:
     if mode not in permissions.MODES:
         raise ValueError(f"unknown session mode {mode!r}; expected one of {permissions.MODES}")
-    model_key = model_key or routing.pick_orchestrator()
+    model_key = model_key or routing.pick_chat()
     provider = get_provider(model_key)
     run = _Run(model_key=model_key, mode=mode, mem=mem or memory.default_memory(),
                registry=registry or TaskRegistry(), todo=TodoManager(), event_sink=event_sink,

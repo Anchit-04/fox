@@ -8,8 +8,9 @@ from config import routing
 from orchestration.claims import FileClaims
 from orchestration.executor_tools import EXECUTOR_TOOLS,REPORT_INSTRUCTIONS,ProposalBox,ReportCollector
 from orchestration.policy import Admission,PolicyRefusal,admit
-from orchestration.tasks import Lane,Task,TaskStatus
+from orchestration.tasks import Lane,Report,Task,TaskStatus
 from orchestration.scope_audit import ScopeAudit
+import external
 
 
 @dataclass(frozen=True)
@@ -90,18 +91,46 @@ def _execute(task:Task,admission:Admission,model_key:str,claims:FileClaims,*,mem
     _set_status(task,TaskStatus.FAILED,event_sink,error=error or "ended without calling report")
 
 
-def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox,journal=None)->None:
+def _execute_external(task:Task,admission:Admission,model_key:str,*,event_sink,follow_up:str|None=None)->None:
+  audit = ScopeAudit(task,event_sink)
+  if follow_up is None:
+    _set_status(task,TaskStatus.RUNNING,event_sink,model_key=model_key)
+  resume = task.external_session if follow_up is not None else None
+  text = follow_up if resume else external.brief(task.description,task.scope)
+  if follow_up is not None and not resume:
+    text += f"\n\nFollow-up: {follow_up}"
+  error = None
+  outcome = None
+  try:
+    outcome = external.run(model_key,text,admission.mode,task_id=task.id,event_sink=audit.sink,resume=resume)
+  except Exception as e:
+    error = f"{model_key} could not run: {type(e).__name__}: {e}"
+  audit.finish()
+  if outcome is not None:
+    task.external_session = outcome.session_id or task.external_session
+  if outcome is not None and outcome.ok:
+    report = Report(outcome=outcome.final_text or "(no summary)",changes=sorted(audit.written),
+                    validation=f"not reported separately by {model_key}; see outcome",blockers=[])
+    _set_status(task,TaskStatus.DONE,event_sink,report=report)
+  else:
+    _set_status(task,TaskStatus.FAILED,event_sink,error=error or outcome.failure)
+
+
+def _run_one(task:Task, session_mode:str,claims:FileClaims,*,mem,event_sink,injection_queue,approver,proposals:ProposalBox,journal=None,default_model=None)->None:
   model_key= "none"
   try:
     admission = admit(task,session_mode)
-    model_key = routing.pick_executor(preferred=task.model_key)
+    model_key = routing.pick_executor(preferred=task.model_key,fallback=default_model)
   except(PolicyRefusal,routing.RoutingError) as e:
     _set_status(task,TaskStatus.FAILED,event_sink,error = str(e))
   else:
-    _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal)
+    if external.is_external(model_key):
+      _execute_external(task,admission,model_key,event_sink=event_sink)
+    else:
+      _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal)
   mem.append_entry(task.id,model_key,_memory_text(task),scope =task.scope,kind="task_result",task_id=task.id)
 
-def continue_task(task:Task,message:str,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,journal,event_sink=None,injection_queue=None,approver=None)->list[str]:
+def continue_task(task:Task,message:str,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,journal,event_sink=None,injection_queue=None,approver=None,default_model=None)->list[str]:
   if task.lane is Lane.WRITE:
     taken = claims.claim(task.id,task.scope)
     if taken:
@@ -117,8 +146,11 @@ def continue_task(task:Task,message:str,session_mode:str,*,claims:FileClaims,inb
     model_key = "none"
     try:
       admission = admit(task,session_mode)
-      model_key = routing.pick_executor(preferred=task.model_key)
-      _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal,history=history)
+      model_key = routing.pick_executor(preferred=task.model_key,fallback=default_model)
+      if external.is_external(model_key):
+        _execute_external(task,admission,model_key,event_sink=event_sink,follow_up=message)
+      else:
+        _execute(task,admission,model_key,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal,history=history)
     except (PolicyRefusal,routing.RoutingError) as e:
       _set_status(task,TaskStatus.FAILED,event_sink,error=str(e))
     finally:
@@ -134,7 +166,7 @@ def continue_task(task:Task,message:str,session_mode:str,*,claims:FileClaims,inb
   return []
 
 
-def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,event_sink=None,injection_queue=None,approver=None,journal=None)->list[str]:
+def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,mem,event_sink=None,injection_queue=None,approver=None,journal=None,default_model=None)->list[str]:
   emit(event_sink,"task_created",{"task_id":task.id,"description":task.description,"lane":task.lane.value,"scope":task.scope})
   if task.lane is Lane.WRITE:
     taken = claims.claim(task.id,task.scope)
@@ -145,7 +177,7 @@ def start_task(task:Task,session_mode:str,*,claims:FileClaims,inbox:TaskInbox,me
 
   def run()->None:
     try:
-      _run_one(task,session_mode,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal)
+      _run_one(task,session_mode,claims,mem=mem,event_sink=event_sink,injection_queue=injection_queue,approver=approver,proposals=proposals,journal=journal,default_model=default_model)
     finally:
       if not task.is_terminal:
         _set_status(task,TaskStatus.FAILED,event_sink,error="executor thread ended without a final state")

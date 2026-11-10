@@ -127,7 +127,7 @@ def run_session(session: Session, task: str, model_key: str | None, mode: str, p
             )
         else:
             final = agent.run_agent(
-                task, verbose=False, model_key=model_key or routing.pick_executor(), interactive=False,
+                task, verbose=False, model_key=model_key or routing.pick_chat(), interactive=False,
                 task_id=None, event_sink=session.handle_event, mem=session.mem,
                 injection_queue=session.injection_queue, keep_alive=True,
                 approver=session.approval_gate, mode=permission_mode,
