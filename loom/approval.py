@@ -207,6 +207,8 @@ def describe(tool_name: str, args: dict) -> str:
     TUI so the CLI and the terminal client word it identically."""
     if tool_name == "run_bash_command":
         return f"run: {args.get('command', '')}"
+    if tool_name == "start_process":
+        return f"start in the background: {args.get('command', '')}"
     if tool_name == "write_file":
         content = args.get("content", "")
         return f"write {args.get('path')} ({len(content)} chars)"
