@@ -44,7 +44,7 @@ class Requests(unittest.TestCase):
         self.assertEqual(self.sent, [{"op": "read", "process": ""}])
 
     def test_long_output_keeps_the_newest_part(self):
-        self.reply["output"] = "old" * 5000 + "newest line"
+        self.reply["output"] = "old" * 15000 + "newest line"
 
         result = json.loads(sandbox_client.read_process("p1"))
 

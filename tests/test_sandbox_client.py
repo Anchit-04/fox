@@ -1,10 +1,13 @@
 import json
+import os
 import queue
+import shutil
 import sys
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loom"))
 
@@ -57,7 +60,7 @@ class FakeProc:
 
 def call_in_background(daemon: _Daemon, command: str, timeout: float = 5.0) -> dict:
     box: dict = {}
-    thread = threading.Thread(target=lambda: box.update(result=daemon.call(command, timeout)))
+    thread = threading.Thread(target=lambda: box.update(result=daemon.call({"command": command}, timeout)))
     thread.start()
     box["thread"] = thread
     return box
@@ -129,7 +132,7 @@ class DaemonRouting(unittest.TestCase):
         self.assertEqual(waiting["result"]["output"], "mine")
 
     def test_timeout_kills_the_daemon(self):
-        result = self.daemon.call("echo x", timeout=0.2)
+        result = self.daemon.call({"command": "echo x"}, timeout=0.2)
 
         self.assertEqual(result["exit_code"], -1)
         self.assertIn("did not respond", result["output"])
@@ -139,7 +142,7 @@ class DaemonRouting(unittest.TestCase):
     def test_broken_pipe_is_reported(self):
         self.proc.stdin.broken = True
 
-        result = self.daemon.call("echo x", timeout=1)
+        result = self.daemon.call({"command": "echo x"}, timeout=1)
 
         self.assertEqual(result["exit_code"], -1)
         self.assertIn("pipe error", result["output"])
@@ -149,14 +152,36 @@ class DaemonRouting(unittest.TestCase):
         self.proc.kill()
         time.sleep(0.1)
 
-        result = self.daemon.call("echo x", timeout=1)
+        result = self.daemon.call({"command": "echo x"}, timeout=1)
 
         self.assertIn("died unexpectedly", result["output"])
         self.assertTrue(self.proc.stdin.requests.empty())
 
 
+class OutputEncoding(unittest.TestCase):
+    def start_env(self) -> dict:
+        with mock.patch.object(sandbox_client.subprocess, "Popen") as popen, \
+                mock.patch.object(sandbox_client._SANDBOXD_PATH.__class__, "exists", return_value=True):
+            sandbox_client._start()
+        return popen.call_args.kwargs["env"]
+
+    def test_commands_write_utf8_through_the_pipe(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTHONIOENCODING", None)
+            self.assertEqual(self.start_env()["PYTHONIOENCODING"], "utf-8")
+
+    def test_a_users_own_setting_wins(self):
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
+            self.assertEqual(self.start_env()["PYTHONIOENCODING"], "cp1252")
+
+
 @unittest.skipUnless(sandbox_client._SANDBOXD_PATH.exists(), "sandboxd.exe is not built")
 class RealSandboxd(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("py"), "the py launcher is not installed")
+    def test_python_can_print_an_emoji(self):
+        result = json.loads(sandbox_client.run_bash_command('py -c "print(\'\\U0001f680 ok\')"'))
+        self.assertEqual(result, {"exit_code": 0, "output": "\U0001f680 ok\r\n"})
+
     def test_parallel_commands_run_side_by_side(self):
         results: dict = {}
 
