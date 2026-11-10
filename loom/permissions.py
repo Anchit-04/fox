@@ -61,7 +61,10 @@ class Decision:
 
 # Tools that only ever touch session-internal state (the todo list, the shared
 # memory log). No filesystem path is involved, so there's no boundary to cross.
-INTERNAL_TOOLS = {"todo_write", "memory_read", "memory_write", "report", "ask_orchestrator", "board"}
+INTERNAL_TOOLS = {"todo_write", "memory_read", "memory_write", "report", "ask_orchestrator", "board",
+                  "read_process", "stop_process"}
+
+COMMAND_TOOLS = frozenset({"run_bash_command", "start_process"})
 
 # tool name -> (argument holding the path, whether it modifies)
 PATH_TOOLS = {
@@ -349,7 +352,7 @@ def classify(tool_name: str, args: dict, mode: str = WORKSPACE_WRITE,
     server, and (later) the orchestrator without behaving differently."""
     workspace = (workspace or paths.workspace()).resolve()
 
-    if tool_name == "run_bash_command":
+    if tool_name in COMMAND_TOOLS:
         danger = destructive(args.get("command", ""))
         if danger and mode == READ_ONLY:
             return Decision(DENY, f"session is read-only, and {danger}")
@@ -385,7 +388,7 @@ def classify(tool_name: str, args: dict, mode: str = WORKSPACE_WRITE,
         verb = "write outside" if modifies else "read outside"
         return Decision(ASK, f"{verb} the workspace: {path_str}")
 
-    if tool_name == "run_bash_command":
+    if tool_name in COMMAND_TOOLS:
         command = args.get("command", "")
         reason = _bash_escalates(command, workspace)
         if reason is None:

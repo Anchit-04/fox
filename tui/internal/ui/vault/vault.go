@@ -173,7 +173,7 @@ func (m Model) detail(models []protocol.VaultEntry, width int) string {
 	lines := []string{
 		"",
 		th.Strong.Render(e.ModelKey),
-		th.Muted.Render(e.Tier + " tier · stored in FOX_HOME/.env, never shown again"),
+		th.Muted.Render(e.Price + " · stored in FOX_HOME/.env, never shown again"),
 		"",
 	}
 	field := th.Muted.Render("press enter to set a key")

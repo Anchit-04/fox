@@ -67,8 +67,9 @@ class Task:
     model_key: str | None = None 
     status: TaskStatus = TaskStatus.QUEUED
     report: Report | None = None
-    error: str | None = None   
+    error: str | None = None
     run: int = 1
+    external_session: str | None = None
 
     @property
     def is_terminal(self) -> bool:

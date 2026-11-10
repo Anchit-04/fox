@@ -20,5 +20,8 @@ PLAN.md
 *.exe~
 loom/sandbox/sandboxd/sandboxd
 
+# Personal worker preferences: default worker, notes per model, models turned off.
+roster.json
+
 # Editor settings are per-machine.
 .vscode/

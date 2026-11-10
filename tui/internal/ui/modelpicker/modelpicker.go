@@ -48,7 +48,7 @@ func (m *Model) visible(models []protocol.VaultEntry) []protocol.VaultEntry {
 	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
 	var ready, locked []protocol.VaultEntry
 	for _, e := range models {
-		if q != "" && !strings.Contains(strings.ToLower(e.ModelKey+" "+e.Tier), q) {
+		if q != "" && !strings.Contains(strings.ToLower(e.ModelKey+" "+e.Price), q) {
 			continue
 		}
 		if e.Present {
@@ -163,7 +163,7 @@ func (m Model) row(e protocol.VaultEntry, selected bool, width int) string {
 		cursor = th.Accent.Render("▸ ")
 	}
 	name := th.Text.Render(e.ModelKey)
-	right := th.Muted.Render(e.Tier)
+	right := th.Muted.Render(e.Price)
 	switch {
 	case !e.Present:
 		name = th.Muted.Render(e.ModelKey)

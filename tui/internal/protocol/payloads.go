@@ -159,7 +159,7 @@ type AttachedPayload struct {
 
 type VaultEntry struct {
 	ModelKey  string `json:"model_key"`
-	Tier      string `json:"tier"`
+	Price     string `json:"price"`
 	Present   bool   `json:"present"`
 	Validated *bool  `json:"validated"`
 }

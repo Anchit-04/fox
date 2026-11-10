@@ -88,7 +88,7 @@ class OrchestratorTests(unittest.TestCase):
             executor(text, **kw)
 
         self.patch(dispatch, "run_agent", recording_executor)
-        self.patch(dispatch.routing, "pick_executor", lambda preferred=None: "fake-exec")
+        self.patch(dispatch.routing, "pick_executor", lambda preferred=None, fallback=None: "fake-exec")
 
         self.bash_runs = []
         self.patch(agent, "run_bash_command", lambda command: self.bash_runs.append(command) or "ran")
@@ -509,7 +509,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(self.run_with(model), "Finished.")
 
     def test_picks_a_strong_model_when_none_is_given(self):
-        self.patch(orch.routing, "pick_orchestrator", lambda: "claude-opus")
+        self.patch(orch.routing, "pick_chat", lambda: "claude-opus")
         chosen = []
         model = ScriptedModel(done())
         self.patch(orch, "get_provider", lambda key: (chosen.append(key), model)[1])

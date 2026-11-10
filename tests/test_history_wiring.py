@@ -109,7 +109,7 @@ class RecordedRuns(unittest.TestCase):
         live = History("check the cart", self.journal.recorder(None), notes_seen=0)
         with mock.patch.object(orch, "get_provider", return_value=orchestrator_model), \
                 mock.patch.object(agent, "get_provider", return_value=executor_model), \
-                mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None: "claude-haiku"):
+                mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None, fallback=None: "claude-haiku"):
             orch.run_orchestrator("check the cart", model_key="claude-haiku", mem=memory.Memory.scratch(),
                                   journal=self.journal, history=live)
         self.assertEqual(self.journal.agents(), [None, "t1"])
@@ -139,7 +139,7 @@ class RecordedRuns(unittest.TestCase):
             calls(("wait_for_tasks", {})),
             ProviderResponse(text="All done.", tool_calls=[]),
         )
-        with mock.patch.object(orch, "get_provider", return_value=orchestrator_model),                 mock.patch.object(agent, "get_provider", side_effect=lambda key: executors.pop(0)),                 mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None: "claude-haiku"):
+        with mock.patch.object(orch, "get_provider", return_value=orchestrator_model),                 mock.patch.object(agent, "get_provider", side_effect=lambda key: executors.pop(0)),                 mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None, fallback=None: "claude-haiku"):
             orch.run_orchestrator("check the cart", model_key="claude-haiku", mem=memory.Memory.scratch(),
                                   journal=self.journal, event_sink=self.sink)
         self.assertTrue(seen[0][0].startswith("look at the cart"))
@@ -168,7 +168,7 @@ class RecordedRuns(unittest.TestCase):
             calls(("wait_for_tasks", {})),
             ProviderResponse(text="All done.", tool_calls=[]),
         )
-        with mock.patch.object(orch, "get_provider", return_value=orchestrator_model),                 mock.patch.object(agent, "get_provider", side_effect=lambda key: executors.pop(0)),                 mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None: "claude-haiku"):
+        with mock.patch.object(orch, "get_provider", return_value=orchestrator_model),                 mock.patch.object(agent, "get_provider", side_effect=lambda key: executors.pop(0)),                 mock.patch.object(dispatch.routing, "pick_executor", lambda preferred=None, fallback=None: "claude-haiku"):
             orch.run_orchestrator("check the cart", model_key="claude-haiku", mem=memory.Memory.scratch(),
                                   journal=self.journal, on_reopen=hooks.append, event_sink=self.sink)
             self.assertIsNone(hooks[0]("t1", "also the empty cart please"))

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import dotenv
 
 from paths import FOX_HOME
-from providers.config import MODEL_REGISTRY, get_provider, get_tier
+from providers.config import MODEL_REGISTRY, get_provider, price_text
 
 
 class VaultError(Exception):
@@ -15,7 +15,7 @@ class VaultError(Exception):
 @dataclass
 class VaultEntry:
     model_key: str
-    tier: str
+    price: str
     present: bool
     validated: bool | None  # None = validate_key() hasn't been called for this key this session
 
@@ -89,7 +89,7 @@ def list_models() -> list[VaultEntry]:
     return [
         VaultEntry(
             model_key=key,
-            tier=get_tier(key),
+            price=price_text(key),
             present=is_present(key),
             validated=_validated_cache.get(key),
         )
