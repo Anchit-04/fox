@@ -1,11 +1,12 @@
 import json
+import time
 from dataclasses import dataclass, field
 
 import git_context
 import memory
 import paths
 import permissions
-from agent import ALL_TOOLS, IDENTITY, restore_todos, run_tool_call
+from agent import ALL_TOOLS, APPROACH, IDENTITY, restore_todos, run_tool_call
 from events import emit
 from approval import DenyApprover
 from calls import generate_or_pause
@@ -23,19 +24,24 @@ from sandbox.sandbox_client import SHELL_NOTE
 from tools import board_tool, browser_tools, file_tools, web
 from tools.todo_tool import TodoManager
 
-SYSTEM_PROMPT = """You are the orchestrator. You can read and edit files and run commands yourself, and you can hand tasks to executor agents.
+SYSTEM_PROMPT = """You are the orchestrator. You can read and edit files, run commands and programs yourself, and hand tasks to executor agents.
 
 What to do yourself and what to delegate:
-- Make connected edits yourself: changes that depend on each other or on decisions you have made. You hold the whole picture; an executor only sees its own task.
-- Delegate investigation: reading many files, finding every place something is used, working out how part of the codebase behaves. Read tasks run in parallel, and their reading stays out of your context.
-- Delegate a write when it is independent of your own edits, for example docs or tests in files you are not changing.
-- Do not delegate anything you could finish in one or two tool calls.
+- For a new request, your first calls are list_directory (only if you need to see what's there) and then delegate_task for every part that goes to a worker. Don't read files, search or run commands for those parts first: the worker does that, faster, and its reading stays out of your context. Investigate only the parts you will do yourself.
+- Split the job into parts. Delegate a part only if all three hold:
+  1. It doesn't need the result of another part that hasn't finished.
+  2. It writes no file that another part writes.
+  3. It is big enough to be worth a handoff: at least 3 tool calls, or reading more than about 300 lines (list_directory shows line counts).
+- A part that matches the user's note for a worker (see "Workers you can delegate to") goes to that worker even when it is small. Checks 1 and 2 still apply.
+- When two or more parts pass, start them all before doing your own part, so the executors work while you do.
+- Do everything else yourself, including steps that depend on decisions you have made: you hold the whole picture, an executor only sees its own task.
+- Read tasks suit investigation (research on the web, reading many files, working out how something behaves): they run in parallel, and their reading stays out of your context.
 
 How work runs:
 - delegate_task starts one task in the background and returns at once with its id. You keep working while it runs.
 - When a task finishes, its result arrives as a "[task finished]" message before your next turn.
 - Notes that agents leave in shared memory arrive the same way, as a "[memory]" message.
-- Hand off independent pieces first, then do your own part, so the executors work while you do.
+- The user can send new requests while tasks run; they arrive as "[Message from human]". Treat each as more work: plan it and delegate it or do it like any other part, without stopping the tasks already running.
 - Call wait_for_tasks when you have nothing else to do until a result arrives.
 - "read" tasks only investigate and cannot modify anything.
 - You and every executor can open web pages in Fox's browser. Use it yourself when the user wants to see or use a page; delegate browsing that is research, as a read task.
@@ -112,6 +118,7 @@ WAIT_TOOL = {
 }
 
 WAIT_SECONDS = 600
+WAIT_SLICE_SECONDS = 0.5
 
 
 def orchestrator_tools(session_mode: str) -> list[dict]:
@@ -181,7 +188,7 @@ class _Run:
 
 
 def _system_prompt(run: _Run) -> str:
-    parts = [IDENTITY.format(model_key=run.model_key), SYSTEM_PROMPT]
+    parts = [IDENTITY.format(model_key=run.model_key), APPROACH, SYSTEM_PROMPT]
     if run.mode == permissions.READ_ONLY:
         parts.append(
             "\nThis session is read-only: you and every task can only read. If the job needs changes, "
@@ -268,13 +275,17 @@ def _continue(tc, run: _Run) -> str:
     return f"{task_id} continues (run {run.registry.get(task_id).run}). Its result will arrive as a message."
 
 
-def _wait(run: _Run) -> str:
+def _wait(run: _Run) -> tuple[str, bool]:
     if not run.running:
-        return "No tasks are running."
-    finished = run.inbox.wait(WAIT_SECONDS)
-    if not finished:
-        return f"Nothing finished in {WAIT_SECONDS}s. Still running: {', '.join(run.running)}"
-    return _finished_text(run, finished)
+        return "No tasks are running.", False
+    deadline = time.monotonic() + WAIT_SECONDS
+    while (left := deadline - time.monotonic()) > 0:
+        finished = run.inbox.wait(min(WAIT_SLICE_SECONDS, left))
+        if finished:
+            return _finished_text(run, finished), True
+        if run.injection_queue is not None and run.injection_queue.has(None):
+            return f"The user sent a new message; it follows. Still running: {', '.join(run.running)}", False
+    return f"Nothing finished in {WAIT_SECONDS}s. Still running: {', '.join(run.running)}", False
 
 
 def _run_turn(calls: list, run: _Run, history: History) -> list[ToolResult]:
@@ -287,7 +298,7 @@ def _run_turn(calls: list, run: _Run, history: History) -> list[ToolResult]:
         elif tc.name == "delegate_task":
             results[tc.id] = _delegate(tc, run)
         elif tc.name == "wait_for_tasks":
-            results[tc.id] = _wait(run)
+            results[tc.id], _ = _wait(run)
         elif tc.name == "continue_task":
             results[tc.id] = _continue(tc, run)
         else:
@@ -366,8 +377,9 @@ def run_orchestrator(task: str, *, model_key: str | None = None, mem: memory.Mem
                     continue
                 history.add(Turn(role="assistant", text=response.text or "(waiting for running tasks)",
                                  raw=response.raw))
-                _deliver(history, run, _wait(run) + "\n\nTasks were still running, so you cannot finish yet. "
-                                                    "Review the results above before your final answer.")
+                waited, finished = _wait(run)
+                review = " Review the results above before your final answer." if finished else ""
+                _deliver(history, run, f"{waited}\n\nTasks were still running, so you cannot finish yet.{review}")
                 continue
 
             turns += 1
