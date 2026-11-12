@@ -177,7 +177,7 @@ class Outcomes(unittest.TestCase):
 
 class Commands(unittest.TestCase):
     def test_claude_code_modes(self):
-        for mode, flag in ((permissions.READ_ONLY, "plan"), (WW, "acceptEdits"),
+        for mode, flag in ((permissions.READ_ONLY, "plan"), (WW, "auto"),
                            (permissions.FULL_ACCESS, "bypassPermissions")):
             args = claude_code.command("claude", mode, None)
             self.assertEqual(args[args.index("--permission-mode") + 1], flag)
