@@ -1,15 +1,27 @@
 package theme
 
 import (
+	"hash/fnv"
 	"image/color"
 	"slices"
 
 	"charm.land/lipgloss/v2"
 )
 
-const Default = "light"
+const Default = "signal"
+
+const (
+	ClaudeCode = "claude-code"
+	Codex      = "codex"
+)
+
+const onColour = "#0d0d0d"
 
 type Palette struct {
+	ClaudeCode string
+	Codex      string
+	Pool       []string
+
 	Background string
 	Selection  string
 	Ink        string
@@ -26,7 +38,28 @@ type Palette struct {
 }
 
 var Palettes = map[string]Palette{
+	"signal": {
+		Background: "#0d0d0d",
+		Selection:  "#1c1c1c",
+		Ink:        "#e9e6df",
+		Dim:        "#8a877f",
+		Faint:      "#5c5a55",
+		Line:       "#2a2a2a",
+		Edge:       "#3a3a3a",
+		Accent:     "#e9e6df",
+		UserBg:     "#1a1a1a",
+		Code:       "#e0b84a",
+		Alert:      "#ff4d4d",
+		Added:      "#19c37d",
+		Removed:    "#ff4d4d",
+		ClaudeCode: "#ff5a1f",
+		Codex:      "#19c37d",
+		Pool:       []string{"#3d7eff", "#ffc21a", "#ff4fa3", "#2bd4d9"},
+	},
 	"light": {
+		ClaudeCode: "#d9480f",
+		Codex:      "#0f8a5f",
+		Pool:       []string{"#1f5fd6", "#a06a00", "#c2297a", "#0b7f8a"},
 		Background: "#d9d8d4",
 		Selection:  "#cac9c4",
 		Ink:        "#1c1c1c",
@@ -42,6 +75,9 @@ var Palettes = map[string]Palette{
 		Removed:    "#a8342a",
 	},
 	"ochre": {
+		ClaudeCode: "#ff5a1f",
+		Codex:      "#19c37d",
+		Pool:       []string{"#3d7eff", "#ffc21a", "#ff4fa3", "#2bd4d9"},
 		Background: "#1e1e1e",
 		Selection:  "#28251f",
 		Ink:        "#d9d6cf",
@@ -79,6 +115,10 @@ type Theme struct {
 	UserBg     color.Color
 	Alert      color.Color
 
+	claudeCode color.Color
+	codex      color.Color
+	pool       []color.Color
+
 	Text     lipgloss.Style
 	Muted    lipgloss.Style
 	Faint    lipgloss.Style
@@ -113,6 +153,11 @@ func New(name, background string) *Theme {
 		Primary:    lipgloss.Color(p.Accent),
 		UserBg:     lipgloss.Color(p.UserBg),
 		Alert:      lipgloss.Color(p.Alert),
+		claudeCode: lipgloss.Color(p.ClaudeCode),
+		codex:      lipgloss.Color(p.Codex),
+	}
+	for _, c := range p.Pool {
+		t.pool = append(t.pool, lipgloss.Color(c))
 	}
 	t.Text = lipgloss.NewStyle().Foreground(t.Ink)
 	t.Muted = lipgloss.NewStyle().Foreground(t.Dim)
@@ -129,10 +174,35 @@ func New(name, background string) *Theme {
 	return t
 }
 
+func (t *Theme) Worker(key string) color.Color {
+	switch key {
+	case "":
+		return t.Dim
+	case ClaudeCode:
+		return t.claudeCode
+	case Codex:
+		return t.codex
+	}
+	if len(t.pool) == 0 {
+		return t.Dim
+	}
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return t.pool[h.Sum32()%uint32(len(t.pool))]
+}
+
+func (t *Theme) Badge(key string) lipgloss.Style {
+	return lipgloss.NewStyle().Background(t.Worker(key)).Foreground(lipgloss.Color(onColour)).Bold(true)
+}
+
+func (t *Theme) Tint(key string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.Worker(key))
+}
+
 func (t *Theme) Box(focused bool) lipgloss.Style {
 	border := t.Edge
 	if focused {
 		border = t.Dim
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
+	return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(0, 1)
 }
