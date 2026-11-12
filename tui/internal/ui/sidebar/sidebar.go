@@ -79,7 +79,7 @@ const (
 	newChatLabel  = "+ new chat"
 	newProjLabel  = "+ new project"
 	sharedMark    = "⇄"
-	listTop       = 5
+	listTop       = 2
 	footerRows    = 3
 	dragThreshold = 2
 	titleWords    = 6
@@ -373,13 +373,11 @@ func Title(sess *state.Session) string {
 func (m Model) View(focused bool) string {
 	th := m.theme
 	w := max(m.width, 1)
-	search := th.Box(false).Width(w).Render(spread(th.Faint.Render("⌕ search"), th.Faint.Render("soon"), w-4))
 	actions := th.Accent.Render(newChatLabel) + "  " + th.Text.Render(newProjLabel)
 	if lipgloss.Width(newChatLabel+"  "+newProjLabel) > w {
 		actions = th.Accent.Render(fit(newChatLabel+"  "+newProjLabel, w))
 	}
-	lines := append([]string{actions}, strings.Split(search, "\n")...)
-	lines = append(lines, th.Heading.Render("projects"))
+	lines := []string{actions, th.Heading.Render("PROJECTS")}
 
 	h := m.listHeight()
 	for i := m.offset; i < min(m.offset+h, len(m.rows)); i++ {
