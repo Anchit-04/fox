@@ -1,6 +1,7 @@
 package splash
 
 import (
+	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -8,12 +9,16 @@ import (
 	"fox/tui/internal/ui/theme"
 )
 
-var wordmark = []string{
-	"11111 01110 10001",
-	"10000 10001 01010",
-	"11110 10001 00100",
-	"10000 10001 01010",
-	"10000 01110 10001",
+var mark = []string{
+	"10000000001",
+	"11000000011",
+	"11100000111",
+	"11111111111",
+	"11111111111",
+	"11311111311",
+	"02211111220",
+	"00222122200",
+	"00002320000",
 }
 
 type Info struct {
@@ -24,49 +29,62 @@ type Info struct {
 	Permission string
 }
 
-func on(row string, i int) bool {
-	return i < len(row) && row[i] == '1'
+func cell(row string, i int) byte {
+	if i < len(row) && (row[i] == '1' || row[i] == '2') {
+		return row[i]
+	}
+	return 0
+}
+
+func paint(th *theme.Theme, c byte) color.Color {
+	if c == '2' {
+		return th.Ink
+	}
+	return th.Primary
 }
 
 func Large(th *theme.Theme) string {
-	lines := make([]string, len(wordmark))
-	for r, row := range wordmark {
+	lines := make([]string, len(mark))
+	for r, row := range mark {
 		var b strings.Builder
 		for i := range len(row) {
-			if on(row, i) {
-				b.WriteString("██")
+			if c := cell(row, i); c != 0 {
+				b.WriteString(lipgloss.NewStyle().Foreground(paint(th, c)).Render("██"))
 			} else {
 				b.WriteString("  ")
 			}
 		}
 		lines[r] = b.String()
 	}
-	return th.Accent.Render(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 func Small(th *theme.Theme) string {
 	var lines []string
-	for r := 0; r < len(wordmark); r += 2 {
-		top, bottom := wordmark[r], ""
-		if r+1 < len(wordmark) {
-			bottom = wordmark[r+1]
+	for r := 0; r < len(mark); r += 2 {
+		top, bottom := mark[r], ""
+		if r+1 < len(mark) {
+			bottom = mark[r+1]
 		}
 		var b strings.Builder
 		for i := range len(top) {
-			switch up, down := on(top, i), on(bottom, i); {
-			case up && down:
-				b.WriteString("█")
-			case up:
-				b.WriteString("▀")
-			case down:
-				b.WriteString("▄")
-			default:
+			up, down := cell(top, i), cell(bottom, i)
+			switch {
+			case up == 0 && down == 0:
 				b.WriteString(" ")
+			case down == 0:
+				b.WriteString(lipgloss.NewStyle().Foreground(paint(th, up)).Render("▀"))
+			case up == 0:
+				b.WriteString(lipgloss.NewStyle().Foreground(paint(th, down)).Render("▄"))
+			case up == down:
+				b.WriteString(lipgloss.NewStyle().Foreground(paint(th, up)).Render("█"))
+			default:
+				b.WriteString(lipgloss.NewStyle().Foreground(paint(th, up)).Background(paint(th, down)).Render("▀"))
 			}
 		}
 		lines = append(lines, b.String())
 	}
-	return th.Accent.Render(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 func Banner(th *theme.Theme, version string) string {
