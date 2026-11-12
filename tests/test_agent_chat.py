@@ -46,5 +46,31 @@ class KeepAliveChat(unittest.TestCase):
         self.assertEqual([p for e, p in events if e == "awaiting_input"], [{"task_id": None}, {"task_id": None}])
 
 
+class TurnCap(unittest.TestCase):
+    def run_looping(self, **extra):
+        from providers import ToolCall
+
+        def step():
+            return ProviderResponse(text="", tool_calls=[ToolCall(id="c", name="todo_write", args={"todos": []})])
+
+        chat = Chat(*[step] * 10)
+        with mock.patch.object(agent, "get_provider", lambda key: chat), \
+                mock.patch.object(agent, "MAX_ITERATIONS", 6):
+            agent.run_agent("look around", verbose=False, model_key="nemotron-super", interactive=False,
+                            mem=memory.Memory.scratch(), browse=False, **extra)
+        return chat
+
+    def test_an_executor_is_told_to_report_before_the_cap(self):
+        chat = self.run_looping(stop_when=lambda: False)
+        warned = [i for i, turns in enumerate(chat.requests)
+                  if any(t.role == "user" and "turns left" in (t.text or "") for t in turns)]
+        self.assertEqual(warned[0], 6 - agent.context.WRAP_UP_TURNS)
+        self.assertEqual(len(chat.requests), 6)
+
+    def test_a_chat_gets_no_such_warning(self):
+        chat = self.run_looping()
+        self.assertFalse(any("turns left" in (t.text or "") for turns in chat.requests for t in turns))
+
+
 if __name__ == "__main__":
     unittest.main()
