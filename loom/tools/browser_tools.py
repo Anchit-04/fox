@@ -102,7 +102,11 @@ LEADS = {
 BROWSER_NOTE = """
 Browser:
 - browser_open opens a web page in Fox's own browser. The other browser_* tools appear once a page is open.
-  The window stays minimized unless you pass show=true, which you should when the human asks to see a page.
+  The window stays minimized unless you pass show=true, which you should when the human asks to see a page
+  or will need to work in it.
+- To read a page, web_fetch is several times faster than the browser. Use the browser when a page needs
+  clicking, typing or signing in, when web_fetch can't read it, or when the human wants to see it.
+- After the human finishes a step in the window, the window stays open in front of them while you carry on.
 - Pages come back as text with numbered elements, like [8] button "Checkout". Act on them by number. After
   each action you get only what changed.
 - Numbers belong to the page they came from; after the page changes, use the new numbers.
@@ -283,7 +287,7 @@ class BrowserSession:
             return
         self.browser = launch.attach_or_launch()
         self.conn = CDPConnection(self.browser.ws_url)
-        self.page = Page(self.conn).open()
+        self.page = Page(self.conn).open(visible=launch.visible_by_default())
         self.actions = Actions(self.page)
 
     def _url(self) -> str:
@@ -311,6 +315,12 @@ class BrowserSession:
         try:
             self.actions.begin_handoff(kind, BAR_TEXT.get(kind, BAR_TEXT["ask"]).format(reason=reason), ref)
             outcome = self._wait_for_human(request)
+            while outcome == "finished":
+                need = self.actions.next_need()
+                if need is None:
+                    break
+                self.actions.begin_handoff(need.kind, BAR_TEXT.get(need.kind, BAR_TEXT["ask"]).format(reason=need.reason))
+                outcome = self._wait_for_human(request)
             result: ActionResult = self.actions.end_handoff(LEADS[outcome])
         except CDPError:
             if self._lost():
