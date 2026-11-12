@@ -53,10 +53,18 @@ MODEL_REGISTRY = {
         "env_key": "GEMINI_API_KEY",
         "vision": True,
     },
-    "deepseek-chat": {
+    "deepseek-pro": {
         "provider": "openai_compatible",
-        "model_id": "deepseek-chat",
-        "price": None,
+        "model_id": "deepseek-v4-pro",
+        "price": {"input": 1.32, "output": 3.96, "cache_read": 0.044, "cache_write": 1.32},
+        "env_key": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "vision": False,
+    },
+    "deepseek-flash": {
+        "provider": "openai_compatible",
+        "model_id": "deepseek-flash",
+        "price": {"input": 0.30, "output": 1.20, "cache_read": 0.006, "cache_write": 0.30},
         "env_key": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com",
         "vision": False,
