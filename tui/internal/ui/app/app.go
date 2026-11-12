@@ -16,6 +16,7 @@ import (
 	"fox/tui/internal/ui/board"
 	"fox/tui/internal/ui/composer"
 	"fox/tui/internal/ui/diffview"
+	"fox/tui/internal/ui/fleet"
 	"fox/tui/internal/ui/layout"
 	"fox/tui/internal/ui/modelpicker"
 	"fox/tui/internal/ui/sidebar"
@@ -61,6 +62,17 @@ type newChat struct {
 const quoteLines = 8
 
 type tickMsg struct{}
+
+type settledMsg struct {
+	seq int
+}
+
+const (
+	settleDelay = 80 * time.Millisecond
+	splitLabel  = " ▦ SPLIT "
+	chatMin     = 32
+	chatMax     = 50
+)
 
 var spinner = []string{"◐", "◓", "◑", "◒"}
 
@@ -117,12 +129,21 @@ type Model struct {
 	cleanCount  int
 	sidebarW    int
 	attaching   map[string]bool
-	chat        newChat
+	draftChat   newChat
 	askPath     bool
 	lastStart   string
 	diffOpen    bool
 	boardOpen   bool
 	changed     map[string]int
+	grid        bool
+	gridSeen    map[string]bool
+	chat        layout.Rect
+	gridRect    layout.Rect
+	budget      layout.Rect
+	settling    bool
+	sizeSeq     int
+
+	fleet fleet.Model
 
 	diff       diffview.Model
 	board      board.Model
@@ -147,6 +168,8 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 		working:    map[string]time.Time{},
 		attaching:  map[string]bool{},
 		changed:    map[string]int{},
+		gridSeen:   map[string]bool{},
+		fleet:      fleet.New(th),
 		connected:  true,
 		diff:       diffview.New(th),
 		board:      board.New(th),
@@ -159,7 +182,6 @@ func New(send Sender, store *state.Store, th *theme.Theme, opts Options) Model {
 	if len(opts.Attach) > 0 {
 		m.attachFocus = opts.Attach[0]
 	}
-	m.transcript.SetBanner(splash.Banner(th, opts.Version))
 	return m
 }
 
@@ -188,7 +210,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		first := m.width == 0
 		m.width, m.height = msg.Width, msg.Height
+		if !first {
+			m.sizeSeq++
+			m.settling = true
+			seq := m.sizeSeq
+			return tea.Tick(settleDelay, func(time.Time) tea.Msg { return settledMsg{seq: seq} })
+		}
+	case settledMsg:
+		if msg.seq == m.sizeSeq {
+			m.settling = false
+		}
 	case client.EventMsg:
 		m.onEvent(msg.Event)
 		return m.afterEvent(msg.Event)
@@ -304,7 +337,7 @@ func (m *Model) onEvent(ev protocol.Event) {
 		if m.starting > 0 {
 			m.starting--
 			if sess := m.store.Session(ev.SessionID); sess != nil && sess.ParentID == "" {
-				m.chat = newChat{}
+				m.draftChat = newChat{}
 			}
 			m.selectSession(ev.SessionID, "")
 		}
@@ -369,8 +402,8 @@ func (m Model) currentProject() (string, string) {
 }
 
 func (m Model) target() (string, string) {
-	if m.chat.chosen {
-		return m.chat.workspace, m.chat.name
+	if m.draftChat.chosen {
+		return m.draftChat.workspace, m.draftChat.name
 	}
 	return m.currentProject()
 }
@@ -379,7 +412,7 @@ func (m *Model) startNewChat(workspace, name string) tea.Cmd {
 	m.active, m.activeTask = "", ""
 	m.draft = nil
 	m.askPath = false
-	m.chat = newChat{workspace: workspace, name: name, chosen: true}
+	m.draftChat = newChat{workspace: workspace, name: name, chosen: true}
 	return m.setFocus(focusComposer)
 }
 
@@ -393,8 +426,8 @@ func (m *Model) askProject() tea.Cmd {
 func (m *Model) chooseProject(text string) {
 	path := strings.Trim(strings.TrimSpace(text), `"'`)
 	m.askPath = false
-	m.chat = newChat{workspace: path, name: state.ProjectName(path), chosen: true}
-	m.flash = "new chat in " + m.chat.name + " · describe the task to start it"
+	m.draftChat = newChat{workspace: path, name: state.ProjectName(path), chosen: true}
+	m.flash = "new chat in " + m.draftChat.name + " · describe the task to start it"
 }
 
 func (m *Model) toggleShared() {
@@ -402,9 +435,9 @@ func (m *Model) toggleShared() {
 		m.flash = "memory is chosen when a chat starts · ctrl+n for a new chat"
 		return
 	}
-	m.chat.workspace, m.chat.name = m.target()
-	m.chat.chosen = true
-	m.chat.shared = !m.chat.shared
+	m.draftChat.workspace, m.draftChat.name = m.target()
+	m.draftChat.chosen = true
+	m.draftChat.shared = !m.draftChat.shared
 }
 
 func (m Model) banner() string {
@@ -417,7 +450,7 @@ func (m Model) banner() string {
 	}
 	_, name := m.target()
 	memory := th.Text.Render("private") + th.Muted.Render(" · ctrl+s shares it with "+name)
-	if m.chat.shared {
+	if m.draftChat.shared {
 		memory = th.Accent.Render("⇄ shared with "+name) + th.Muted.Render(" · ctrl+s makes it private")
 	}
 	return th.Accent.Render("new chat in "+name) + th.Muted.Render(" · memory: ") + memory
@@ -444,10 +477,20 @@ func (m *Model) sync() {
 	if m.width == 0 {
 		return
 	}
+	sess := m.store.Session(m.active)
+	if sess != nil && len(sess.TaskOrder) > 0 && !m.gridSeen[sess.ID] {
+		m.gridSeen[sess.ID] = true
+		m.grid = true
+	}
 	showSide := m.sideOpen() && m.active != ""
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide)
+	hide := m.gridMode()
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide, hide)
 	m.composer.SetWidth(m.frame.Main.W - 2)
-	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide)
+	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide, hide)
+	if hide && m.focus == focusSidebar {
+		m.setFocus(focusComposer)
+	}
+	m.splitBody(sess)
 	m.sidebar.SetSize(m.frame.Sidebar.W, m.frame.Sidebar.H)
 	m.diff.SetSize(m.frame.Side.W, m.frame.Side.H)
 	m.board.SetSize(m.frame.Side.W, m.frame.Side.H)
@@ -458,8 +501,73 @@ func (m *Model) sync() {
 	if m.statusLine() != "" {
 		status = 1
 	}
-	m.transcript.SetSize(max(m.frame.Body.W-2, 1), max(m.frame.Body.H-status, 1))
-	m.transcript.Sync(m.store.Session(m.active), m.activeTask)
+	m.transcript.SetCompact(m.gridShown())
+	if m.chat.W > 0 {
+		width := max(m.chat.W-2, 1)
+		if m.settling && m.transcript.Width() > 0 {
+			width = m.transcript.Width()
+		}
+		m.transcript.SetSize(width, max(m.chat.H-status, 1))
+	}
+	m.transcript.Sync(sess, m.activeTask)
+}
+
+func (m Model) gridMode() bool {
+	sess := m.store.Session(m.active)
+	return m.grid && sess != nil && len(sess.TaskOrder) > 0
+}
+
+func (m Model) gridShown() bool {
+	return m.gridMode() && m.activeTask == "" && m.draft == nil
+}
+
+func (m *Model) splitBody(sess *state.Session) {
+	body := m.frame.Body
+	m.chat, m.gridRect, m.budget = body, layout.Rect{}, layout.Rect{}
+	if !m.gridShown() {
+		return
+	}
+	top := body
+	if body.H >= layout.MinPaneH+fleet.BudgetRows+1 {
+		rows := layout.SplitV(body, 0, 1, fleet.BudgetRows)
+		top, m.budget = rows[0], rows[2]
+	}
+	chatW := min(max(top.W*3/10, chatMin), chatMax)
+	if top.W-chatW-1 >= 2*layout.MinPaneW+1 {
+		cols := layout.SplitH(top, chatW, 1, 0)
+		m.chat, m.gridRect = cols[0], cols[2]
+	} else {
+		m.chat, m.gridRect = layout.Rect{}, top
+	}
+	m.fleet.Layout(sess, m.gridRect)
+}
+
+func (m Model) splitButton() (layout.Rect, bool) {
+	sess := m.store.Session(m.active)
+	if sess == nil || len(sess.TaskOrder) == 0 || !m.connected {
+		return layout.Rect{}, false
+	}
+	w := lipgloss.Width(splitLabel)
+	h := m.frame.Header
+	return layout.Rect{X: h.X + h.W - 1 - w, Y: h.Y, W: w, H: 1}, h.W > w+2
+}
+
+func (m *Model) toggleGrid() tea.Cmd {
+	sess := m.store.Session(m.active)
+	if sess == nil || len(sess.TaskOrder) == 0 {
+		m.flash = "the split view opens once this chat has delegated work to agents"
+		return nil
+	}
+	m.grid = !m.grid
+	m.activeTask = ""
+	m.fleet.Blur()
+	return m.setFocus(focusComposer)
+}
+
+func (m *Model) zoom(task string) tea.Cmd {
+	m.activeTask = task
+	m.fleet.Blur()
+	return m.setFocus(focusComposer)
 }
 
 func (m *Model) selectSession(id, task string) tea.Cmd {
@@ -519,7 +627,7 @@ func (m *Model) submit(text string) tea.Cmd {
 			Mode:           m.opts.Mode,
 			PermissionMode: m.opts.Permission,
 			Workspace:      workspace,
-			SharedMemory:   m.chat.shared,
+			SharedMemory:   m.draftChat.shared,
 		})
 	}
 	sess := m.store.Session(m.active)
@@ -716,9 +824,24 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.board.Key(msg)
 	}
 
+	if m.gridShown() {
+		switch {
+		case k == "tab":
+			m.fleet.Next(m.store.Session(m.active))
+			return nil
+		case k == "enter" && m.fleet.Focused() != "" && strings.TrimSpace(m.composer.Value()) == "":
+			return m.zoom(m.fleet.Focused())
+		case k == "esc" && m.fleet.Focused() != "":
+			m.fleet.Blur()
+			return nil
+		}
+	}
+
 	switch k {
 	case "tab":
 		return m.setFocus(m.nextFocus())
+	case "ctrl+f":
+		return m.toggleGrid()
 	case "ctrl+d":
 		return m.toggleDiff()
 	case "ctrl+b":
@@ -842,6 +965,9 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		_, y := r.Local(msg.X, msg.Y)
 		return m.picker.Press(y, m.store.Models)
 	}
+	if r, ok := m.splitButton(); ok && r.Contains(msg.X, msg.Y) {
+		return m.toggleGrid()
+	}
 	switch {
 	case f.HasSide && f.Side.Contains(msg.X, msg.Y):
 		if m.diffOpen {
@@ -856,8 +982,12 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 	case f.HasSidebar && f.Sidebar.Contains(msg.X, msg.Y):
 		x, y := f.Sidebar.Local(msg.X, msg.Y)
 		return m.sidebar.Press(x, y, msg.Button)
-	case m.active != "" && m.draft == nil && f.Body.Contains(msg.X, msg.Y):
-		x, y := f.Body.Local(msg.X, msg.Y)
+	case m.gridShown() && m.gridRect.Contains(msg.X, msg.Y):
+		if id, ok := m.fleet.TaskAt(msg.X, msg.Y); ok {
+			return m.zoom(id)
+		}
+	case m.active != "" && m.draft == nil && m.chat.Contains(msg.X, msg.Y):
+		x, y := m.chat.Local(msg.X, msg.Y)
 		m.transcript.Press(x-1, y)
 	case f.Composer.Contains(msg.X, msg.Y):
 		x, y := f.Composer.Local(msg.X, msg.Y)
@@ -873,7 +1003,7 @@ func (m *Model) motion(msg tea.MouseMotionMsg) {
 		return
 	}
 	if m.transcript.Dragging() {
-		m.transcript.Drag(msg.X-m.frame.Body.X-1, msg.Y-m.frame.Body.Y)
+		m.transcript.Drag(msg.X-m.chat.X-1, msg.Y-m.chat.Y)
 		return
 	}
 	m.sidebar.Motion(msg.X, msg.Y)
@@ -981,8 +1111,14 @@ func (m Model) hint() string {
 		return "enter picks the folder · esc cancels"
 	case m.active == "":
 		return "enter starts the chat · ctrl+s shared memory · tab sidebar"
+	case m.activeTask != "" && m.gridMode():
+		return "enter messages this agent · esc back to the grid"
 	case m.activeTask != "":
 		return "enter messages this executor · esc back to the orchestrator"
+	case m.gridShown() && m.fleet.Focused() != "":
+		return "enter opens this agent · tab next · esc clears"
+	case m.gridShown():
+		return "click an agent to open it · tab picks one · ctrl+f closes the split view"
 	case m.transcript.HasSelection():
 		return "ctrl+t asks about the selection · esc clears"
 	}
@@ -1056,13 +1192,10 @@ func (m Model) mainView() string {
 	} else if m.draft != nil {
 		body = lipgloss.NewStyle().Width(f.Body.W).Height(f.Body.H).MaxHeight(f.Body.H).PaddingLeft(1).
 			Render(m.draftView(f.Body.W - 2))
+	} else if m.gridShown() {
+		body = m.gridView()
 	} else {
-		view := m.transcript.View()
-		if line := m.statusLine(); line != "" {
-			view += "\n" + line
-		}
-		body = lipgloss.NewStyle().Width(f.Body.W).Height(f.Body.H).MaxHeight(f.Body.H).PaddingLeft(1).
-			Render(view)
+		body = m.chatView(f.Body)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.header(f.Header.W),
@@ -1072,12 +1205,49 @@ func (m Model) mainView() string {
 	)
 }
 
+func (m Model) chatView(r layout.Rect) string {
+	view := m.transcript.View()
+	if line := m.statusLine(); line != "" {
+		view += "\n" + line
+	}
+	if m.settling {
+		lines := strings.Split(view, "\n")
+		for i, l := range lines {
+			lines[i] = ansi.Truncate(l, max(r.W-1, 1), "")
+		}
+		view = strings.Join(lines, "\n")
+	}
+	return lipgloss.NewStyle().Width(r.W).Height(r.H).MaxWidth(r.W).MaxHeight(r.H).PaddingLeft(1).Render(view)
+}
+
+func (m Model) gridView() string {
+	th := m.theme
+	sess := m.store.Session(m.active)
+	top := m.fleet.View(sess, time.Now())
+	if m.chat.W > 0 {
+		divider := th.Rule.Render(strings.TrimSuffix(strings.Repeat("│\n", m.chat.H), "\n"))
+		top = lipgloss.JoinHorizontal(lipgloss.Top, m.chatView(m.chat), divider, top)
+	}
+	if m.budget.H == 0 {
+		return top
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		top,
+		th.Rule.Render(strings.Repeat("─", m.frame.Body.W)),
+		fleet.Budget(th, sess, m.budget.W),
+	)
+}
+
 func (m Model) header(width int) string {
 	th := m.theme
 	sess := m.store.Session(m.active)
 	var left string
 	if t := m.task(); t != nil {
-		left = th.Strong.Render("exec "+t.ID) + th.Muted.Render(" · from "+sidebar.Title(sess))
+		back := " · from " + sidebar.Title(sess)
+		if m.gridMode() {
+			back += " · esc back to the grid"
+		}
+		left = th.Badge(t.Model).Render(" "+strings.ToUpper(t.ID+" "+t.Model)+" ") + th.Muted.Render(back)
 	} else if m.draft != nil && sess != nil {
 		left = th.Strong.Render("side chat") + th.Muted.Render(" · from "+sidebar.Title(sess))
 	} else if sess == nil && m.askPath {
@@ -1102,7 +1272,17 @@ func (m Model) header(width int) string {
 	if !m.connected {
 		right = th.Warn.Render("disconnected")
 	}
-	if lipgloss.Width(left)+lipgloss.Width(right)+3 > width && sess != nil {
+	if _, ok := m.splitButton(); ok {
+		button := th.Muted.Render(splitLabel)
+		if m.grid {
+			button = lipgloss.NewStyle().Background(th.Ink).Foreground(th.Background).Bold(true).Render(splitLabel)
+		}
+		if right != "" {
+			right += " "
+		}
+		right += button
+	}
+	if lipgloss.Width(left)+lipgloss.Width(right)+3 > width && sess != nil && m.task() == nil {
 		left = th.Strong.Render(sidebar.Title(sess))
 	}
 	gap := max(width-2-lipgloss.Width(left)-lipgloss.Width(right), 1)
