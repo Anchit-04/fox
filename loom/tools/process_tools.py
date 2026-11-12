@@ -4,10 +4,12 @@ START_PROCESS_TOOL = {
     "type": "function",
     "name": "start_process",
     "description": (
-        "Start a cmd.exe command that keeps running after this call returns: a dev server, a file "
-        "watcher, a screen recorder. Returns its process id (like p1), whether it is still running, and "
-        "what it printed in its first 2 seconds. Use run_bash_command for commands that finish on their "
-        f"own. At most {sandbox_client.MAX_BACKGROUND_PROCESSES} run at once in a session."
+        "Start a cmd.exe command that keeps running after this call returns: a download, an install, a "
+        "media encode or a build that may take longer than "
+        f"{sandbox_client.COMMAND_TIMEOUT_SECONDS} seconds, or a dev server, a file watcher, a screen "
+        "recorder. Returns its process id (like p1), whether it is still running, and what it printed in "
+        "its first 2 seconds. Use run_bash_command for quick commands. At most "
+        f"{sandbox_client.MAX_BACKGROUND_PROCESSES} run at once in a session."
     ),
     "parameters": {
         "type": "object",

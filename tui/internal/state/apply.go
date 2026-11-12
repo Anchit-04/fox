@@ -2,6 +2,7 @@ package state
 
 import (
 	"strings"
+	"time"
 
 	"fox/tui/internal/protocol"
 )
@@ -79,6 +80,9 @@ func (s *Store) Apply(ev protocol.Event) {
 	if ev.TaskID != nil {
 		taskID = *ev.TaskID
 	}
+	if taskID != "" {
+		s.touch(sess.task(taskID), ev)
+	}
 
 	switch ev.Type {
 	case protocol.SessionStarted:
@@ -92,6 +96,7 @@ func (s *Store) Apply(ev protocol.Event) {
 		if taskID != "" {
 			t := sess.task(taskID)
 			t.Status, t.Error, t.Report = "running", "", nil
+			t.Ended = time.Time{}
 		}
 	case protocol.AgentTurn:
 		s.applyAgentTurn(sess, taskID, ev)
@@ -130,7 +135,7 @@ func (s *Store) Apply(ev protocol.Event) {
 			t.Description, t.Lane, t.Scope, t.Status = p.Description, p.Lane, p.Scope, "queued"
 		}
 	case protocol.TaskStatusChanged:
-		applyTaskStatus(sess, taskID, ev)
+		applyTaskStatus(sess, taskID, ev, s.when(ev))
 	case protocol.ProposalMade:
 		if p, err := protocol.Payload[protocol.ProposalMadePayload](ev); err == nil {
 			sess.add(Entry{Kind: NoticeEntry, TaskID: taskID, Text: "proposal: " + p.Text})
@@ -366,13 +371,39 @@ func applyInjected(sess *Session, taskID string, ev protocol.Event) {
 	sess.add(Entry{Kind: UserEntry, TaskID: taskID, Text: content})
 }
 
-func applyTaskStatus(sess *Session, taskID string, ev protocol.Event) {
+func (s *Store) touch(t *Task, ev protocol.Event) {
+	t.Rev++
+	switch ev.Type {
+	case protocol.ToolCall:
+		t.Steps++
+	case protocol.AgentTurn, protocol.ModelCalled:
+	default:
+		return
+	}
+	if t.Started.IsZero() {
+		t.Started = s.when(ev)
+	}
+}
+
+func applyTaskStatus(sess *Session, taskID string, ev protocol.Event, at time.Time) {
 	p, err := protocol.Payload[protocol.TaskStatusChangedPayload](ev)
 	if err != nil || taskID == "" {
 		return
 	}
 	t := sess.task(taskID)
 	t.Status = p.Status
+	switch {
+	case TaskFinished(p.Status):
+		if t.Started.IsZero() {
+			t.Started = at
+		}
+		t.Ended = at
+	case p.Status == "running":
+		if t.Started.IsZero() {
+			t.Started = at
+		}
+		t.Ended = time.Time{}
+	}
 	if p.Error != nil {
 		t.Error = *p.Error
 	}
@@ -391,6 +422,11 @@ func applyModelCalled(sess *Session, taskID string, ev protocol.Event) {
 	}
 	sess.InputTokens += p.InputTokens
 	sess.OutputTokens += p.OutputTokens
+	if taskID != "" {
+		t := sess.task(taskID)
+		t.InputTokens += p.InputTokens
+		t.OutputTokens += p.OutputTokens
+	}
 	if p.Cost == nil {
 		sess.CostPartial = true
 		return

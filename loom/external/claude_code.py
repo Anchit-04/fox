@@ -7,7 +7,7 @@ TITLE = "Claude Code, Anthropic's coding agent"
 
 PERMISSION_MODES = {
     permissions.READ_ONLY: "plan",
-    permissions.WORKSPACE_WRITE: "acceptEdits",
+    permissions.WORKSPACE_WRITE: "auto",
     permissions.FULL_ACCESS: "bypassPermissions",
 }
 

@@ -119,7 +119,7 @@ func main() {
 }
 
 const (
-	DefaultTimeout             = 30 * time.Second
+	DefaultTimeout             = 120 * time.Second
 	DefaultMemoryLimitMB int64 = 512
 )
 

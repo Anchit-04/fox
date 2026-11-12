@@ -23,7 +23,7 @@ import paths
 import transport
 
 MAX_OUTPUT_CHARS = 30_000  # context-budget cap, not a sandboxing concern — sandboxd itself doesn't truncate
-COMMAND_TIMEOUT_SECONDS = 30
+COMMAND_TIMEOUT_SECONDS = 120
 MAX_BACKGROUND_PROCESSES = 8
 
 SHELL_NOTE = f"""Shell:
@@ -34,10 +34,13 @@ SHELL_NOTE = f"""Shell:
 - Every command starts in the workspace folder. A `cd` does not carry over to the next command.
 - Everything a command starts is closed when the command ends: `start`, `explorer`, browsers, and servers left
   running in the background. Exit code 0 from `start` does not mean anything opened. Use browser_open for web pages.
+  Fox can't open or control desktop apps for the user yet.
 - A command is stopped after {COMMAND_TIMEOUT_SECONDS} seconds, and output past {MAX_OUTPUT_CHARS} characters is cut.
-- To keep something running (a dev server, a file watcher, a recorder), use start_process instead. Check on it
-  with read_process and end it with stop_process. Background processes are shared by this whole session,
+- Anything that may take longer (a download, an install, an ffmpeg encode, a build) or must keep running (a dev
+  server, a watcher, a recorder) goes through start_process. Check on it with read_process until it exits, and end
+  it with stop_process. Background processes are shared by this whole session,
   at most {MAX_BACKGROUND_PROCESSES} run at once, and all of them are stopped when the session ends.
+- To install a program, prefer `winget install --id <id> -e`; check with `where <name>` first.
 """
 
 # Comfortably above sandboxd's own 30s per-command timeout (main.go's
