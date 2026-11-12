@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	SessionStarted       = "session_started"
@@ -46,7 +49,16 @@ type Event struct {
 	SessionID string          `json:"session_id"`
 	TaskID    *string         `json:"task_id"`
 	Seq       int             `json:"seq"`
+	TS        string          `json:"ts"`
 	Raw       json.RawMessage `json:"-"`
+}
+
+func (ev Event) Time() (time.Time, bool) {
+	if ev.TS == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, ev.TS)
+	return t, err == nil
 }
 
 func Decode(data []byte) (Event, error) {
@@ -67,7 +79,7 @@ type Stored struct {
 }
 
 func FromStored(sessionID string, s Stored) Event {
-	return Event{Type: s.Type, SessionID: sessionID, TaskID: s.TaskID, Seq: s.Seq, Raw: s.Payload}
+	return Event{Type: s.Type, SessionID: sessionID, TaskID: s.TaskID, Seq: s.Seq, TS: s.TS, Raw: s.Payload}
 }
 func Payload[T any](ev Event) (T, error) {
 	var p T
