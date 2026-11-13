@@ -1,14 +1,17 @@
 package theme
 
 import (
+	"fmt"
 	"hash/fnv"
 	"image/color"
 	"slices"
+	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
-const Default = "signal"
+const Default = "midnight"
 
 const (
 	ClaudeCode = "claude-code"
@@ -23,6 +26,8 @@ type Palette struct {
 	Pool       []string
 
 	Background string
+	Panel      string
+	Card       string
 	Selection  string
 	Ink        string
 	Dim        string
@@ -38,6 +43,26 @@ type Palette struct {
 }
 
 var Palettes = map[string]Palette{
+	"midnight": {
+		Background: "#0b0f17",
+		Panel:      "#121825",
+		Card:       "#1a2233",
+		Selection:  "#24304d",
+		Ink:        "#dfe5ee",
+		Dim:        "#7a869c",
+		Faint:      "#4a556c",
+		Line:       "#1f2738",
+		Edge:       "#2c3750",
+		Accent:     "#6ea0ff",
+		UserBg:     "#151c2b",
+		Code:       "#f2c14e",
+		Alert:      "#ff5c5c",
+		Added:      "#3ecf8e",
+		Removed:    "#ff5c5c",
+		ClaudeCode: "#ff7a45",
+		Codex:      "#3ecf8e",
+		Pool:       []string{"#6ea0ff", "#f2c14e", "#d58cff", "#4fd1d9"},
+	},
 	"signal": {
 		Background: "#0d0d0d",
 		Selection:  "#1c1c1c",
@@ -106,6 +131,8 @@ func Names() []string {
 type Theme struct {
 	Name       string
 	Background color.Color
+	Panel      color.Color
+	Card       color.Color
 	Selection  color.Color
 	Ink        color.Color
 	Dim        color.Color
@@ -142,7 +169,15 @@ func New(name, background string) *Theme {
 	if _, invalid := bg.(lipgloss.NoColor); invalid {
 		bg = lipgloss.Color(p.Background)
 	}
+	if p.Panel == "" {
+		p.Panel = p.Selection
+	}
+	if p.Card == "" {
+		p.Card = p.UserBg
+	}
 	t := &Theme{
+		Panel:      lipgloss.Color(p.Panel),
+		Card:       lipgloss.Color(p.Card),
 		Name:       name,
 		Background: bg,
 		Selection:  lipgloss.Color(p.Selection),
@@ -199,10 +234,25 @@ func (t *Theme) Tint(key string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.Worker(key))
 }
 
+const reset = "\x1b[m"
+
+func Fill(s string, bg color.Color, width int) string {
+	r, g, b, _ := bg.RGBA()
+	on := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r>>8, g>>8, b>>8)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		pad := max(width-ansi.StringWidth(line), 0)
+		line = strings.ReplaceAll(line, "\x1b[0m", reset)
+		line = strings.ReplaceAll(line, reset, reset+on)
+		lines[i] = on + line + strings.Repeat(" ", pad) + reset
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (t *Theme) Box(focused bool) lipgloss.Style {
 	border := t.Edge
 	if focused {
 		border = t.Dim
 	}
-	return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(0, 1)
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
 }

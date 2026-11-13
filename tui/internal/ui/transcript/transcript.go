@@ -274,7 +274,7 @@ func (m Model) card(sess *state.Session, taskID string, width int) string {
 		border = th.Worker(task.Model)
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(border).
 		Padding(0, 1).
 		Width(width).

@@ -311,8 +311,11 @@ func (s *Store) applySessionEnded(sess *Session, ev protocol.Event) {
 			sess.Status = Failed
 			sess.add(Entry{Kind: ErrorEntry, Text: "session failed: " + p.FinalText})
 			return
-		case "interrupted", "paused":
-			sess.Status = serverStatus(p.Status)
+		case "paused":
+			sess.Status = Paused
+			return
+		case "interrupted":
+			sess.Status = Interrupted
 			sess.add(Entry{Kind: NoticeEntry, Text: stopNote(p.FinalText)})
 			return
 		}
