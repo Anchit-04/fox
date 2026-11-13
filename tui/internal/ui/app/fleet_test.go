@@ -12,6 +12,7 @@ import (
 
 	"fox/tui/internal/client"
 	"fox/tui/internal/protocol"
+	"fox/tui/internal/ui/sidebar"
 )
 
 func delegating(t *testing.T, width int) *Model {
@@ -31,7 +32,7 @@ func plain(m *Model) string {
 
 func TestTheGridOpensWhenAChatDelegates(t *testing.T) {
 	m := delegating(t, 160)
-	if !m.grid || m.frame.HasSidebar {
+	if !m.grid || !m.frame.HasSidebar || m.sidebar.Tab() != sidebar.ChatTab {
 		t.Fatalf("grid = %v, sidebar = %v", m.grid, m.frame.HasSidebar)
 	}
 	out := plain(m)
@@ -82,7 +83,7 @@ func TestTabPicksAnAgentAndEnterOpensIt(t *testing.T) {
 }
 
 func TestTheSplitButtonClosesTheGridAndTheSidebarReturns(t *testing.T) {
-	m := delegating(t, 160)
+	m := delegating(t, 120)
 	r, ok := m.splitButton()
 	if !ok {
 		t.Fatal("no split button")
@@ -120,7 +121,7 @@ func TestMoreAgentsThanFitFoldTheFinishedOnes(t *testing.T) {
 		event(t, m, fmt.Sprintf(`{"type":"task_status_changed","session_id":"s1","seq":%d,"task_id":"t%d","status":"done","model_key":"codex"}`, 11+i*2, i))
 	}
 	out := plain(m)
-	if !strings.Contains(out, "T9 codex DONE") {
+	if !strings.Contains(out, "T3 codex DONE") {
 		t.Fatalf("the finished agents aren't in the strip:\n%s", out)
 	}
 	if !strings.Contains(out, "T1 CODEX") || !strings.Contains(out, "T2 CLAUDE-CODE") {
