@@ -251,11 +251,6 @@ func (m Model) bar(t *state.Task, width int, now time.Time) string {
 
 func (m Model) footer(t *state.Task, now time.Time) string {
 	parts := []string{Clock(t.Elapsed(now))}
-	if t.Steps == 1 {
-		parts = append(parts, "1 step")
-	} else if t.Steps > 1 {
-		parts = append(parts, fmt.Sprintf("%d steps", t.Steps))
-	}
 	if tokens := t.InputTokens + t.OutputTokens; tokens > 0 {
 		parts = append(parts, Compact(tokens)+" tok")
 	}
@@ -351,7 +346,8 @@ func (m Model) pane(sess *state.Session, t *state.Task, r layout.Rect, focused b
 		lines = append(lines, gutter+l)
 	}
 	lines = append(lines, gutter+th.Faint.Render(ansi.Truncate(m.footer(t, now), inner, "…")))
-	return lipgloss.NewStyle().Width(r.W).Height(r.H).MaxWidth(r.W).MaxHeight(r.H).Render(strings.Join(lines, "\n"))
+	view := lipgloss.NewStyle().Width(r.W).Height(r.H).MaxWidth(r.W).MaxHeight(r.H).Render(strings.Join(lines, "\n"))
+	return theme.Fill(view, th.Panel, r.W)
 }
 
 type share struct {
