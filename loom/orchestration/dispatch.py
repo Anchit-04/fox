@@ -44,7 +44,8 @@ class TaskInbox:
 def _set_status(task: Task, to: TaskStatus, event_sink,*,report=None, error=None, model_key=None)->None:
   task.transition(to,report=report,error=error)
   emit(event_sink,"task_status_changed",{"task_id":task.id,"status":to.value,"error":error,
-                                         "report":asdict(report) if report else None,"model_key":model_key})
+                                         "report":asdict(report) if report else None,"model_key":model_key,
+                                         "external_session":task.external_session})
 
 def _memory_text(task: Task)->str:
   if task.report is None:
@@ -106,8 +107,10 @@ def _execute_external(task:Task,admission:Admission,model_key:str,*,event_sink,f
   except Exception as e:
     error = f"{model_key} could not run: {type(e).__name__}: {e}"
   audit.finish()
-  if outcome is not None:
+  if outcome is not None and not outcome.signed_out:
     task.external_session = outcome.session_id or task.external_session
+  if outcome is not None and outcome.signed_out:
+    emit(event_sink,"model_error",{"task_id":task.id,"model_key":model_key,"kind":"auth","message":outcome.failure})
   if outcome is not None and outcome.ok:
     report = Report(outcome=outcome.final_text or "(no summary)",changes=sorted(audit.written),
                     validation=f"not reported separately by {model_key}; see outcome",blockers=[])
