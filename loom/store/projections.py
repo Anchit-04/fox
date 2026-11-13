@@ -64,7 +64,7 @@ def _task_created(db: sqlite3.Connection, session_id: str, seq: int, ts: str, pa
 def _task_status_changed(db: sqlite3.Connection, session_id: str, seq: int, ts: str, payload: dict) -> None:
     status = payload["status"]
     columns, values = ["status = ?"], [status]
-    for column in ("error", "model_key"):
+    for column in ("error", "model_key", "external_session"):
         if payload.get(column) is not None:
             columns.append(f"{column} = ?")
             values.append(payload[column])

@@ -136,6 +136,7 @@ MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
         taken_at   TEXT NOT NULL,
         PRIMARY KEY (session_id, path)
     );""",
+    "ALTER TABLE tasks ADD COLUMN external_session TEXT;",
 ]
 
 

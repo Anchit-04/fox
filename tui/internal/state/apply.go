@@ -95,7 +95,7 @@ func (s *Store) Apply(ev protocol.Event) {
 	case protocol.TaskReopened:
 		if taskID != "" {
 			t := sess.task(taskID)
-			t.Status, t.Error, t.Report = "running", "", nil
+			t.Status, t.Error, t.Report, t.SignIn = "running", "", nil, ""
 			t.Ended = time.Time{}
 		}
 	case protocol.AgentTurn:
@@ -155,12 +155,17 @@ func (s *Store) Apply(ev protocol.Event) {
 		if p, err := protocol.Payload[protocol.ModelErrorPayload](ev); err == nil {
 			sess.add(Entry{Kind: ErrorEntry, TaskID: taskID, Text: modelErrorText(p)})
 			s.setStatus(sess, NeedsYou)
+			if p.Kind == "auth" && taskID != "" {
+				sess.task(taskID).SignIn = p.ModelKey
+			}
 		}
 	}
 }
 
 func modelErrorText(p protocol.ModelErrorPayload) string {
 	switch p.Kind {
+	case "auth":
+		return p.ModelKey + " is signed out. Press ctrl+l to sign in; your last message is sent again once you're back."
 	case "key":
 		return p.ModelKey + " rejected the API key. Fix it in the vault (ctrl+k), then send any message to retry."
 	case "credits":

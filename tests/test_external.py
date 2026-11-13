@@ -115,6 +115,12 @@ class ClaudeRecording(unittest.TestCase):
         self.assertFalse(outcome.ok)
         self.assertIn("OAuth session expired", outcome.failure)
         self.assertEqual(outcome.session_id, "d6b8bea7-2dbc-43c6-a490-1fbe6a1c8fd6")
+        self.assertTrue(outcome.signed_out)
+
+    def test_an_ordinary_failure_is_not_a_sign_in_problem(self):
+        self.assertFalse(runner.signed_out("Claude Code ended with error_max_turns"))
+        self.assertFalse(runner.signed_out(None))
+        self.assertTrue(runner.signed_out("Your access token could not be refreshed. Please sign in again."))
 
 
 class ClaudeToolCalls(unittest.TestCase):
@@ -317,6 +323,42 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(self.calls[-1]["resume"], "th1")
         self.assertEqual(self.calls[-1]["text"], "Fix the docstring too.")
         self.assertEqual((task.status, task.run), (TaskStatus.DONE, 2))
+
+    def follow_up(self, task, message, outcome):
+        inbox = dispatch.TaskInbox()
+        journal = mock.Mock()
+        journal.turns.return_value = []
+        with self.fake_run(outcome), mock.patch.object(external, "available", return_value=True):
+            dispatch.continue_task(task, message, WW, claims=FileClaims(), inbox=inbox,
+                                   mem=mock.Mock(), journal=journal, event_sink=self.sink)
+            inbox.wait(10)
+
+    def test_a_signed_out_run_asks_for_a_sign_in_and_keeps_the_session(self):
+        task = Task(id="t1", description="Fix it.", lane=Lane.WRITE, scope=[], model_key="claude-code")
+        with self.fake_run(external.Outcome(True, "Fixed.", None, "cc1")):
+            self.start(task)
+        self.follow_up(task, "Hi", external.Outcome(False, "", "Failed to authenticate", "cc-new", signed_out=True))
+        self.assertEqual(task.status, TaskStatus.FAILED)
+        self.assertEqual(task.external_session, "cc1")
+        error = kinds(self.events, "model_error")[0]
+        self.assertEqual((error["task_id"], error["model_key"], error["kind"]), ("t1", "claude-code", "auth"))
+        self.follow_up(task, "Hi again", external.Outcome(True, "Hello.", None, "cc1"))
+        self.assertEqual((self.calls[-1]["resume"], self.calls[-1]["text"]), ("cc1", "Hi again"))
+
+    def test_a_first_run_that_was_signed_out_leaves_nothing_to_resume(self):
+        task = Task(id="t1", description="Fix it.", lane=Lane.WRITE, scope=[], model_key="claude-code")
+        with self.fake_run(external.Outcome(False, "", "Failed to authenticate", "cc-empty", signed_out=True)):
+            self.start(task)
+        self.assertIsNone(task.external_session)
+        self.follow_up(task, "Hi", external.Outcome(True, "Fixed.", None, "cc2"))
+        self.assertIsNone(self.calls[-1]["resume"])
+        self.assertIn("Fix it.", self.calls[-1]["text"])
+
+    def test_the_session_travels_with_every_status_change(self):
+        task = Task(id="t1", description="x", lane=Lane.WRITE, scope=[], model_key="codex")
+        with self.fake_run(external.Outcome(True, "Done.", None, "th9")):
+            self.start(task)
+        self.assertEqual(kinds(self.events, "task_status_changed")[-1]["external_session"], "th9")
 
 
 if __name__ == "__main__":
