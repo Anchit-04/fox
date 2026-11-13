@@ -72,6 +72,7 @@ const (
 	splitLabel  = " ▦ SPLIT "
 	chatMin     = 32
 	chatMax     = 50
+	wideWidth   = 140
 )
 
 var spinner = []string{"◐", "◓", "◑", "◒"}
@@ -481,9 +482,11 @@ func (m *Model) sync() {
 	if sess != nil && len(sess.TaskOrder) > 0 && !m.gridSeen[sess.ID] {
 		m.gridSeen[sess.ID] = true
 		m.grid = true
+		m.sidebar.SetTab(sidebar.ChatTab)
+		m.sidebar.Refresh(m.store, m.active, m.activeTask)
 	}
 	showSide := m.sideOpen() && m.active != ""
-	hide := m.gridMode()
+	hide := m.gridMode() && m.width < wideWidth
 	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide, hide)
 	m.composer.SetWidth(m.frame.Main.W - 2)
 	m.frame = layout.Compute(m.width, m.height, m.sidebarW, m.composer.Height(), showSide, hide)
@@ -1096,7 +1099,10 @@ func (m Model) hint() string {
 		return m.flash
 	}
 	if m.focus == focusSidebar {
-		return "↑↓ move · enter open · n new chat · d delete · a archive · c clear project · ←→ fold · tab back"
+		if m.sidebar.Tab() == sidebar.ChatTab {
+			return "↑↓ move · enter open · 1 projects · 2 chat · n new chat · tab back"
+		}
+		return "↑↓ move · enter open · 1 projects · 2 chat · n new chat · d delete · a archive · c clear · ←→ fold"
 	}
 	if m.focus == focusSide && m.boardOpen {
 		return "j/k scroll · h/l pan · n/p card · esc back to chat · ctrl+b close"
