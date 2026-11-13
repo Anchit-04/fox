@@ -225,6 +225,8 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case client.EventMsg:
 		m.onEvent(msg.Event)
 		return m.afterEvent(msg.Event)
+	case signedInMsg:
+		return m.onSignedIn(msg)
 	case diffview.SourceMsg:
 		m.diff.SetSource(msg.Source)
 		return m.requestDiff(msg.Source)
@@ -871,6 +873,8 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openPicker()
 	case "ctrl+k":
 		return m.openVault()
+	case "ctrl+l":
+		return m.signIn()
 	case "ctrl+t":
 		return m.openSide()
 	case "ctrl+o":
