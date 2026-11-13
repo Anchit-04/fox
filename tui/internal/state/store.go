@@ -59,6 +59,7 @@ type Task struct {
 	Error       string
 	Report      *protocol.Report
 	Cost        float64
+	SignIn      string
 
 	Started      time.Time
 	Ended        time.Time
