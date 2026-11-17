@@ -11,6 +11,8 @@ from external.cli import find_cli
 
 STDERR_TAIL_CHARS = 1500
 RESULT_CHARS = 2000
+SIGNED_OUT_SIGNS = ("failed to authenticate", "oauth session expired", "not logged in", "please run /login",
+                    "log in again", "sign in again", "login required", "access token could not be refreshed")
 
 
 @dataclass
@@ -19,6 +21,12 @@ class Outcome:
     final_text: str
     failure: str | None
     session_id: str | None
+    signed_out: bool = False
+
+
+def signed_out(failure: str | None) -> bool:
+    text = (failure or "").lower()
+    return any(sign in text for sign in SIGNED_OUT_SIGNS)
 
 
 class Translator:
@@ -84,7 +92,8 @@ class Translator:
             extra = (stderr.strip() or "\n".join(self.noise))[-STDERR_TAIL_CHARS:]
             if extra:
                 failure += "\n" + extra
-        return Outcome(ok=failure is None, final_text=self.final_text, failure=failure, session_id=self.session_id)
+        return Outcome(ok=failure is None, final_text=self.final_text, failure=failure, session_id=self.session_id,
+                       signed_out=signed_out(failure))
 
 
 def run(worker, brief: str, mode: str, *, task_id: str | None, event_sink, resume: str | None = None) -> Outcome:

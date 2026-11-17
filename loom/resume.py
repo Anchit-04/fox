@@ -44,7 +44,7 @@ def restore_registry(store, session_id: str) -> TaskRegistry:
                               scope=json.loads(row["scope"] or "[]"), model_key=row.get("model_key"),
                               status=TaskStatus(row["status"]),
                               report=Report(**report) if report else None, error=row.get("error"),
-                              run=row.get("run") or 1))
+                              run=row.get("run") or 1, external_session=row.get("external_session")))
     return registry
 
 

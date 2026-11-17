@@ -13,6 +13,8 @@ INPUT_TIMEOUT = 10.0
 NAVIGATION_GRACE = 0.25
 SETTLE_TIMEOUT = 5.0
 QUIET_MS = 250
+QUIET_CAP_MS = 2000
+NEXT_STEP_WAIT = 2.5
 ALLOWED_SCHEMES = ("http", "https", "about", "data")
 
 KEYS = {
@@ -117,6 +119,26 @@ new Promise(resolve => {
   observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   function done() { observer.disconnect(); clearTimeout(timer); clearTimeout(cap); resolve(true); }
 })
+"""
+
+SCROLL_JS = """
+((dx, dy) => {
+  const scrolls = el => {
+    const s = getComputedStyle(el);
+    return (dy && /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 1) ||
+           (dx && /(auto|scroll)/.test(s.overflowX) && el.scrollWidth > el.clientWidth + 1);
+  };
+  const page = document.scrollingElement || document.documentElement;
+  let el = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  while (el && el !== document.body && el !== document.documentElement && !scrolls(el)) el = el.parentElement;
+  const target = el && el !== document.body && el !== document.documentElement ? el : page;
+  const move = box => {
+    const before = [box.scrollLeft, box.scrollTop];
+    box.scrollBy({ left: dx, top: dy, behavior: "instant" });
+    return box.scrollLeft !== before[0] || box.scrollTop !== before[1];
+  };
+  return move(target) || (target !== page && move(page));
+})(%s, %s)
 """
 
 HUMAN_JS = r"""
@@ -440,6 +462,7 @@ class Actions:
         metrics = self.page.call("Page.getLayoutMetrics")["cssVisualViewport"]
         width, height = metrics["clientWidth"], metrics["clientHeight"]
         with self._settling():
+            moved = True
             if direction in ("top", "bottom"):
                 self.page.evaluate("window.scrollTo(0, %s)" % ("0" if direction == "top" else
                                                                 "document.documentElement.scrollHeight"))
@@ -449,8 +472,9 @@ class Actions:
                 if direction not in deltas:
                     raise ActionError("Scroll direction must be up, down, left, right, top or bottom.")
                 dx, dy = deltas[direction]
-                self._input("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": width / 2, "y": height / 2,
-                                                         "deltaX": dx, "deltaY": dy})
+                moved = self.page.evaluate(SCROLL_JS % (json.dumps(dx), json.dumps(dy)))
+        if not moved:
+            return self._finish(f"The page is already as far {direction} as it goes.")
         return self._finish(f"Scrolled {direction}.")
 
     def upload(self, ref: int | None, files: str | list[str]) -> ActionResult:
@@ -543,6 +567,15 @@ class Actions:
             return "finished"
         return None
 
+    def next_need(self) -> HumanNeeded | None:
+        deadline = time.monotonic() + NEXT_STEP_WAIT
+        while time.monotonic() < deadline:
+            need = (self._poll_state() or {}).get("need")
+            if need:
+                return HumanNeeded(need["kind"], need["reason"])
+            time.sleep(0.3)
+        return None
+
     def end_handoff(self, lead: str) -> ActionResult:
         try:
             self.page.evaluate(HANDOFF_REMOVE_JS, context_id=self.snapshotter.world, timeout=3)
@@ -556,7 +589,6 @@ class Actions:
             self.page.call("Page.setInterceptFileChooserDialog", {"enabled": True})
         except CDPError:
             pass
-        self.page.hide()
         self.snapshotter.forget()
         return self._finish(lead, full=True)
 
@@ -725,7 +757,7 @@ class Actions:
         if self.dialog:
             return
         try:
-            self.page.evaluate(QUIET_JS % {"quiet": QUIET_MS, "cap": int(SETTLE_TIMEOUT * 1000)},
+            self.page.evaluate(QUIET_JS % {"quiet": QUIET_MS, "cap": QUIET_CAP_MS},
                                timeout=SETTLE_TIMEOUT + 2)
         except CDPError:
             pass

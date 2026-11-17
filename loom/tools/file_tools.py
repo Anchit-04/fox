@@ -232,6 +232,7 @@ def list_directory(path: str = ".", max_depth: int = 2) -> str:
         return json.dumps({"error": f"{path} is a file, not a directory"})
 
     entries = []
+    files = {}
     root_depth = len(root.parts)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SEARCH_IGNORE_DIRS]
@@ -241,12 +242,34 @@ def list_directory(path: str = ".", max_depth: int = 2) -> str:
             continue
         rel_dir = Path(dirpath).relative_to(root)
         for d in dirnames:
-            entries.append(f"{rel_dir / d}/".lstrip("./"))
+            entries.append(f"{rel_dir / d}/")
         for f in filenames:
-            entries.append(str(rel_dir / f).lstrip("./"))
+            entries.append(str(rel_dir / f))
+            files[str(rel_dir / f)] = Path(dirpath) / f
 
     entries.sort()
-    return json.dumps({"path": path, "entries": entries, "count": len(entries)})
+    lines = {}
+    for entry in sorted(files)[:LINE_COUNT_MAX_FILES]:
+        count = _line_count(files[entry])
+        if count is not None:
+            lines[entry] = count
+    return json.dumps({"path": path, "entries": entries, "count": len(entries), "lines": lines})
+
+
+LINE_COUNT_MAX_FILES = 500
+LINE_COUNT_MAX_BYTES = 2_000_000
+
+
+def _line_count(path: Path) -> int | None:
+    try:
+        if path.stat().st_size > LINE_COUNT_MAX_BYTES:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if b"\0" in data[:8192]:
+        return None
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
 # --- search_files ---------------------------------------------------------------
@@ -340,7 +363,7 @@ FILE_TOOLS = [
     {
         "type": "function",
         "name": "list_directory",
-        "description": "List files and folders under a directory, up to a depth limit. Use this instead of bash ls/dir/find for exploring the project structure.",
+        "description": "List files and folders under a directory, up to a depth limit, with a line count for each text file. Use this instead of bash ls/dir/find for exploring the project structure.",
         "parameters": {
             "type": "object",
             "properties": {

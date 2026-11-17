@@ -96,6 +96,12 @@ def render_for_prompt(roster: Roster, default: str | None) -> str:
             if name in roster.notes:
                 line += f" · the user's note: {roster.notes[name]}"
             lines.append(line)
+        if any(name in roster.notes for name in names):
+            lines.append("The notes above are the user's instructions for who gets which work. When you first "
+                         "split the job, match each part against them: a part that fits a worker's note goes to "
+                         "that worker, not to you, however small it looks. Only checks 1 and 2 for delegating "
+                         "still apply to it; the size check does not. Start those tasks before you begin any "
+                         "part yourself.")
         if any(external.is_external(n) for n in names):
             lines.append("External CLIs use their own tools inside this session's permission mode. They can't "
                          "call ask_orchestrator or ask the user anything; their final summary becomes the "

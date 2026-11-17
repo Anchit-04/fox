@@ -558,5 +558,90 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(model.requests, [])
 
 
+class MessagesWhileTasksRun(unittest.TestCase):
+    setUp = OrchestratorTests.setUp
+    patch = OrchestratorTests.patch
+    task_status = OrchestratorTests.task_status
+    run_with = OrchestratorTests.run_with
+
+    def test_a_message_wakes_the_wait_and_stays_queued(self):
+        queue = InjectionQueue()
+        run = orch._Run(model_key="m", mode=permissions.WORKSPACE_WRITE, mem=self.mem, registry=mock.Mock(),
+                        todo=mock.Mock(), injection_queue=queue, running={"t1": mock.Mock()})
+        threading.Timer(0.3, queue.push, args=(None, "oh also check the logs")).start()
+
+        started = time.monotonic()
+        text, finished = orch._wait(run)
+
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(text.startswith("The user sent a new message"))
+        self.assertIn("t1", text)
+        self.assertFalse(finished)
+        self.assertEqual(queue.drain(None), ["oh also check the logs"])
+
+    def test_a_message_for_a_task_does_not_wake_the_orchestrator(self):
+        queue = InjectionQueue()
+        queue.push("t1", "for the worker only")
+        run = orch._Run(model_key="m", mode=permissions.WORKSPACE_WRITE, mem=self.mem, registry=mock.Mock(),
+                        todo=mock.Mock(), injection_queue=queue, running={"t1": mock.Mock()})
+        self.patch(orch, "WAIT_SECONDS", 1)
+        text, finished = orch._wait(run)
+        self.assertTrue(text.startswith("Nothing finished in 1s"))
+
+    def test_new_work_is_delegated_while_the_first_task_keeps_running(self):
+        queue = InjectionQueue()
+        gate = threading.Event()
+        pushed = {}
+        seen_status = {}
+
+        def executor_that_waits_for_the_gate(text, **kw):
+            if text.startswith("slow job"):
+                gate.wait(10)
+            executor(text, **kw)
+
+        def push_mid_wait():
+            pushed["at"] = time.monotonic()
+            queue.push(None, "oh also write the changelog")
+
+        def wait_and_speak_while_waiting():
+            threading.Timer(0.3, push_mid_wait).start()
+            return wait("w1")
+
+        def delegate_the_new_request():
+            seen_status["t1"] = self.task_status("t1")
+            seen_status["picked_up_after"] = time.monotonic() - pushed["at"]
+            return reply(delegate("b", "write the changelog", lane="write", scope=["CHANGELOG.md"]))
+
+        def release_the_first_task():
+            gate.set()
+            return wait("w3")
+
+        def finish():
+            queue.close(None)
+            return done("Both done.")
+
+        self.patch(dispatch, "run_agent", executor_that_waits_for_the_gate)
+        model = ScriptedModel(
+            reply(delegate("a", "slow job", lane="write", scope=["cli.py"])),
+            wait_and_speak_while_waiting,
+            delegate_the_new_request,
+            wait("w2"),
+            release_the_first_task,
+            finish,
+        )
+
+        final = self.run_with(model, injection_queue=queue)
+
+        self.assertEqual(final, "Both done.")
+        self.assertIn("The user sent a new message", seen(model.requests[2]))
+        self.assertIn("[Message from human]: oh also write the changelog", seen(model.requests[2]))
+        self.assertEqual(seen_status["t1"], "running")
+        self.assertLess(seen_status["picked_up_after"], 2)
+        kinds = [(e, p.get("task_id"), p.get("status")) for e, p in self.events
+                 if e in ("task_created", "task_status_changed")]
+        self.assertLess(kinds.index(("task_created", "t2", None)), kinds.index(("task_status_changed", "t1", "done")))
+        self.assertEqual((self.task_status("t1"), self.task_status("t2")), ("done", "done"))
+
+
 if __name__ == "__main__":
     unittest.main()

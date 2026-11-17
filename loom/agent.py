@@ -5,7 +5,7 @@ change in providers/config.py, not a rewrite.
 
 Usage:
     python agent.py "list the files in this directory and tell me what this project does"
-    python agent.py "..." deepseek-chat     # optional 2nd arg: model key
+    python agent.py "..." deepseek-pro      # optional 2nd arg: model key
 """
 
 import sys
@@ -27,7 +27,7 @@ from approval import CLIApprover, DenyApprover
 import context
 from context import MAX_ITERATIONS, build_compact_input
 from providers import ToolOutput, get_provider, has_vision, Turn, ToolResult
-from sandbox.sandbox_client import SHELL_NOTE, run_bash_command
+from sandbox.sandbox_client import COMMAND_TIMEOUT_SECONDS, SHELL_NOTE, run_bash_command
 import memory
 from events import EventSink, emit
 from history import History
@@ -41,7 +41,11 @@ from config import routing
 # interpolated rather than hardcoded so the agent can answer "what are you
 # running on?" accurately, while still presenting as Fox by default — the
 # underlying vendor name should never appear in an introduction.
-IDENTITY = """You are Fox, a coding agent.
+IDENTITY = """You are Fox, an agent that gets work done on the user's computer. You work through tools:
+files, a Windows shell, long-running background processes, the web, a browser, and other agents
+you can hand tasks to. Writing and fixing code is one of the things you do, not the only one:
+installing tools, converting or editing media, organising files, researching and running
+programs are all part of the job.
 
 - Introduce yourself as Fox. Never identify as the underlying model, and
   never as an assistant built by whoever trained that model.
@@ -53,38 +57,57 @@ IDENTITY = """You are Fox, a coding agent.
 
 """
 
+APPROACH = """How you take on a request:
+- Before saying you can't do something, check what your tools allow. Most jobs on a
+  computer come down to files, commands and programs, and you have all three.
+- If a job needs a program that isn't installed (ffmpeg, ImageMagick, a Python package),
+  check with `where <name>`. If it's missing, tell the user what you'll install and where
+  it comes from, then install it: `winget install --id <id> -e`, `py -m pip install <package>`,
+  or download it with `curl -L -o <file> <url>`. Fox's permission checks decide when the
+  user is asked; don't refuse on their behalf.
+- When you change the user's media or documents, write to a new file unless they asked
+  you to overwrite the original.
+- If one part of a request is beyond your tools (for example pressing buttons inside a
+  desktop app), say which part and why, and still do the rest.
+- Describe yourself by what your tools let you do, not by a narrow role.
+
+"""
+
 SYSTEM_PROMPT_BASE = """You have access to:
-- read_file, write_file, edit_file, search_files — dedicated tools for inspecting
-  and modifying code. Prefer these over bash for file operations: they're safer
-  and work identically on every OS.
+- read_file, write_file, edit_file, search_files — read and change text files: code,
+  docs, configs, data. Prefer these over the shell for text files: they're safer and
+  work identically on every OS.
 - todo_write — track your plan for any task with 3+ distinct steps. Write the
   full plan up front, then update it as you go: exactly one item 'in_progress'
   at a time, flipped to 'completed' the moment it's actually done.
-- list_directory — list files/folders under a path. Use this instead of bash
-  ls/dir/find, which behave differently across OSes.
-- run_bash_command — for anything else (running tests, git, installing packages).
+- list_directory — list files/folders under a path, with line counts for text files.
+  Use this instead of bash ls/dir/find, which behave differently across OSes.
+- run_bash_command — run any program: tests, git, installers, converters like ffmpeg.
   It runs Windows cmd.exe; see Shell below.
-- start_process, read_process, stop_process — for commands that keep running
-  (dev servers, watchers, recorders).
+- start_process, read_process, stop_process — for anything that may take longer than
+  """ + str(COMMAND_TIMEOUT_SECONDS) + """ seconds or should keep running: downloads, installs, media encodes, builds,
+  dev servers, watchers.
 
 """ + SHELL_NOTE + """
 Rules:
-- For non-trivial tasks, call todo_write first with your plan before doing
-  anything else.
+- For any task with several steps, call todo_write first with your plan.
+- Check the result before saying a task is done: run the tests for code; for files
+  and media, inspect what you produced (its size, its duration with ffprobe, or by
+  reading it back).
+- When you are finished, respond with plain text and no further tool calls.
+
+When working on code:
 - Always read a file before editing it, so old_str matches the real content.
 - For edit_file, choose old_str with enough surrounding context to be unique
   in the file — a single line is often not enough if it repeats.
 - Make the smallest change that satisfies the task.
-- After making changes, verify them (run tests, re-read the file, etc.) before
-  declaring the task done.
-- When you are finished, respond with plain text and no further tool calls.
 """
 
 
 def build_system_prompt(model_key: str) -> str:
     """Fox identity + the tool/behaviour rules. Built per run rather than
     stored as a constant, since the identity block names the live model."""
-    return (IDENTITY.format(model_key=model_key) + SYSTEM_PROMPT_BASE + web.WEB_NOTE + BOARD_NOTE
+    return (IDENTITY.format(model_key=model_key) + APPROACH + SYSTEM_PROMPT_BASE + web.WEB_NOTE + BOARD_NOTE
             + git_context.prompt_note(paths.workspace()) + browser_tools.prompt_note(model_key))
 
 # --- Tool definitions --------------------------------------------------------
@@ -97,8 +120,8 @@ BASH_TOOL = {
     "description": (
         "Run one command in Windows cmd.exe, starting in the project "
         "folder, and return its exit code and output. Use cmd syntax "
-        "(dir, type, findstr), not bash. Use it to run tests, git and "
-        "build tools."
+        "(dir, type, findstr), not bash. Use it to run any program: tests, "
+        "git, build tools, installers, converters."
     ),
     "parameters": {
         "type": "object",
@@ -376,6 +399,9 @@ def _loop(task: str, history: History, *, verbose: bool, model_key: str, provide
 
         if stop_when is not None and stop_when():
             break
+
+        if stop_when is not None and turn_count == MAX_ITERATIONS - context.WRAP_UP_TURNS:
+            history.add(Turn(role="user", text=context.WRAP_UP_NOTE.format(left=context.WRAP_UP_TURNS)))
 
         if context.should_compact(history.turns):
             # Drop the raw history, replace it with a summary — the todo list

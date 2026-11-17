@@ -96,6 +96,12 @@ class Prompt(Fixture):
         kimi = [line for line in text.splitlines() if line.startswith("- kimi-k2:")][0]
         self.assertTrue(kimi.endswith("· the user's note: good at CSS"))
 
+    def test_notes_are_instructions_for_who_gets_which_work(self):
+        rule = "The notes above are the user's instructions for who gets which work."
+        self.assertIn(rule, self.render(rosters.Roster(notes={"kimi-k2": "good at CSS"})))
+        self.assertNotIn(rule, self.render())
+        self.assertNotIn(rule, self.render(rosters.Roster(notes={"kimi-k2": "x"}, off=frozenset({"kimi-k2"}))))
+
     def test_problems_are_shown(self):
         self.assertIn("roster.json: unknown names: kimi", self.render(rosters.Roster(problems=("unknown names: kimi",))))
 
@@ -121,7 +127,7 @@ class PickExecutor(Fixture):
 
     def test_a_model_without_a_key(self):
         with self.assertRaisesRegex(routing.RoutingError, "has no API key"):
-            routing.pick_executor("deepseek-chat")
+            routing.pick_executor("deepseek-pro")
 
     def test_a_model_turned_off(self):
         self.write({"off": ["kimi-k2"]})
@@ -133,7 +139,7 @@ class PickExecutor(Fixture):
         self.assertEqual(routing.pick_executor(fallback="nemotron-super"), "kimi-k2")
 
     def test_an_unusable_default_worker_is_an_error_not_a_silent_swap(self):
-        self.write({"default_worker": "deepseek-chat"})
+        self.write({"default_worker": "deepseek-pro"})
         with self.assertRaisesRegex(routing.RoutingError, "default_worker in roster.json"):
             routing.pick_executor(fallback="nemotron-super")
 
@@ -153,7 +159,7 @@ class PickExecutor(Fixture):
                 routing.pick_executor()
 
     def test_default_worker_helper_never_raises(self):
-        self.write({"default_worker": "deepseek-chat"})
+        self.write({"default_worker": "deepseek-pro"})
         self.assertIsNone(routing.default_worker("nemotron-super"))
 
 

@@ -3,12 +3,14 @@ package transcript
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"fox/tui/internal/protocol"
 	"fox/tui/internal/state"
@@ -27,6 +29,7 @@ type Model struct {
 	lines     []string
 	sel       selection
 	banner    string
+	compact   bool
 	open      map[string]bool
 	expandAll bool
 	dirty     bool
@@ -45,10 +48,14 @@ func (m *Model) SetSize(w, h int) {
 	}
 	if w != m.view.Width() {
 		m.ClearSelection()
+		m.key = ""
 	}
+	following := m.view.AtBottom()
 	m.view.SetWidth(w)
 	m.view.SetHeight(h)
-	m.key = ""
+	if following {
+		m.view.GotoBottom()
+	}
 }
 
 func (m *Model) Sync(sess *state.Session, task string) {
@@ -230,6 +237,9 @@ func (m Model) card(sess *state.Session, taskID string, width int) string {
 	if task == nil {
 		task = &state.Task{ID: taskID}
 	}
+	if m.compact {
+		return m.row(task, width)
+	}
 
 	icon, live := taskIcon(task.Status)
 	name := "exec · " + label(task)
@@ -242,7 +252,7 @@ func (m Model) card(sess *state.Session, taskID string, width int) string {
 	}
 	iconStyle := th.Muted
 	if live {
-		iconStyle = th.Accent
+		iconStyle = th.Tint(task.Model)
 	}
 	head := iconStyle.Render(icon) + " " + th.Text.Render(name)
 	gap := max(width-4-lipgloss.Width(head)-lipgloss.Width(meta), 1)
@@ -261,7 +271,7 @@ func (m Model) card(sess *state.Session, taskID string, width int) string {
 
 	border := th.Edge
 	if live {
-		border = th.Dim
+		border = th.Worker(task.Model)
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -269,6 +279,92 @@ func (m Model) card(sess *state.Session, taskID string, width int) string {
 		Padding(0, 1).
 		Width(width).
 		Render(strings.Join(lines, "\n"))
+}
+
+type Step struct {
+	Tool   string
+	Detail string
+	Bad    bool
+	Open   bool
+	Count  int
+}
+
+func (s Step) joins(later Step) bool {
+	return s.Tool != "" && s.Tool == later.Tool && s.Bad == later.Bad
+}
+
+func Tail(entries []state.Entry, taskID string, n int) []Step {
+	var out []Step
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.TaskID != taskID {
+			continue
+		}
+		full := len(out) >= n
+		switch e.Kind {
+		case state.ToolCallEntry:
+			step := Step{Tool: e.Tool, Detail: formatArgs(e.Args), Open: true, Count: 1}
+			if j, ok := nextResult(entries, i); ok {
+				step.Open = false
+				result := outcome(entries[j])
+				if entries[j].Kind == state.DeniedEntry || strings.HasPrefix(result, "error:") || strings.HasPrefix(result, "exit ") {
+					step.Bad = true
+					step.Detail = result
+				}
+			}
+			if last := len(out) - 1; last >= 0 && step.joins(out[last]) {
+				out[last].Count++
+				continue
+			}
+			if full {
+				i = -1
+				continue
+			}
+			out = append(out, step)
+		case state.AgentEntry, state.NoticeEntry, state.ErrorEntry:
+			if full {
+				i = -1
+				continue
+			}
+			out = append(out, Step{Detail: truncate(oneLine(e.Text), 160), Bad: e.Kind == state.ErrorEntry})
+		}
+	}
+	slices.Reverse(out)
+	return out
+}
+
+func Label(t *state.Task) string { return label(t) }
+
+func ReportLine(r *protocol.Report) string { return reportLine(r) }
+
+func (m *Model) SetCompact(on bool) {
+	if m.compact != on {
+		m.compact = on
+		m.key = ""
+	}
+}
+
+func (m Model) Width() int { return m.view.Width() }
+
+func (m Model) row(task *state.Task, width int) string {
+	th := m.theme
+	status := strings.ToUpper(task.Status)
+	if status == "" {
+		status = "QUEUED"
+	}
+	who := task.Model
+	if who == "" {
+		who = "worker"
+	}
+	head := th.Tint(task.Model).Render("■ "+strings.ToUpper(task.ID)) + " " + th.Text.Render(who)
+	tail := th.Muted.Render(status)
+	room := width - lipgloss.Width(head) - lipgloss.Width(tail) - 4
+	if room < 4 {
+		return ansi.Truncate(head+" "+tail, width, "…")
+	}
+	text := ansi.Truncate(label(task), room, "…")
+	gap := max(width-lipgloss.Width(head)-lipgloss.Width(text)-lipgloss.Width(tail)-3, 1)
+	return head + th.Faint.Render(" · ") + th.Muted.Render(text) + strings.Repeat(" ", gap) + tail
 }
 
 func activity(entries []state.Entry, taskID string, n int) []string {

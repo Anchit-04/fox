@@ -25,6 +25,10 @@ class InjectionQueue:
             self._pending[task_id].append(content)
             self._condition.notify_all()
 
+    def has(self, task_id) -> bool:
+        with self._condition:
+            return bool(self._pending.get(task_id))
+
     def drain(self, task_id) -> list:
         """Returns and clears whatever's pending for task_id. Non-blocking —
         an empty list just means nothing arrived, not an error."""

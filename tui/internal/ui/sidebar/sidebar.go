@@ -2,8 +2,8 @@ package sidebar
 
 import (
 	"fmt"
-	"image/color"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -55,6 +55,19 @@ const (
 	projectRow rowKind = iota
 	sessionRow
 	taskRow
+	headRow
+	agentRow
+	agentTaskRow
+	gapRow
+)
+
+func (k rowKind) selectable() bool { return k != headRow && k != gapRow }
+
+type Tab int
+
+const (
+	ProjectsTab Tab = iota
+	ChatTab
 )
 
 type row struct {
@@ -63,7 +76,6 @@ type row struct {
 	session  *state.Session
 	task     *state.Task
 	depth    int
-	last     bool
 	sessions []string
 }
 
@@ -76,10 +88,11 @@ type drag struct {
 
 const (
 	actionsRow    = 0
-	newChatLabel  = "+ new chat"
-	newProjLabel  = "+ new project"
+	projectsLabel = " Projects "
+	chatLabel     = " Chat "
+	addLabel      = "+ "
 	sharedMark    = "⇄"
-	listTop       = 5
+	listTop       = 2
 	footerRows    = 3
 	dragThreshold = 2
 	titleWords    = 6
@@ -98,6 +111,71 @@ type Model struct {
 	keys      int
 	models    int
 	drag      *drag
+	tab       Tab
+	agents    int
+	retarget  bool
+}
+
+func (m *Model) Tab() Tab { return m.tab }
+
+func (m *Model) SetTab(t Tab) {
+	if m.tab != t {
+		m.tab, m.offset, m.retarget = t, 0, true
+	}
+}
+
+func (m Model) tabLabel(t Tab) string {
+	if t == ProjectsTab {
+		return projectsLabel
+	}
+	if m.agents > 0 {
+		return fmt.Sprintf("%s%d ", chatLabel, m.agents)
+	}
+	return chatLabel
+}
+
+func running(sess *state.Session) bool {
+	return sess.Status == state.Working || sess.Status == state.NeedsYou
+}
+
+func agentRows(s *state.Store) ([]row, int) {
+	var rows []row
+	count := 0
+	for _, p := range s.Projects() {
+		var block []row
+		for _, top := range p.Sessions {
+			for _, sess := range append([]*state.Session{top}, s.Children(top.ID)...) {
+				var tasks []row
+				for _, id := range sess.TaskOrder {
+					if t := sess.Tasks[id]; t.Live() {
+						tasks = append(tasks, row{kind: agentTaskRow, project: p, session: sess, task: t, depth: 2, sessions: []string{sess.ID}})
+					}
+				}
+				if running(sess) || len(tasks) > 0 {
+					block = append(block, row{kind: agentRow, project: p, session: sess, sessions: []string{sess.ID}})
+					block = append(block, tasks...)
+				}
+			}
+		}
+		if len(block) == 0 {
+			continue
+		}
+		count += len(block)
+		rows = append(rows, row{kind: headRow, project: p})
+		for _, r := range block {
+			rows = append(rows, r, row{kind: gapRow, project: p})
+		}
+	}
+	return rows, count
+}
+
+func (m *Model) step(from, dir int) int {
+	for i := from + dir; i >= 0 && i < len(m.rows); i += dir {
+		if m.rows[i].kind.selectable() {
+			return i
+		}
+	}
+	return from
 }
 
 func New(th *theme.Theme) Model {
@@ -111,7 +189,13 @@ func (m *Model) SetSize(w, h int) {
 
 func (m *Model) Refresh(s *state.Store, active, task string) {
 	m.rows = m.rows[:0]
-	for _, p := range s.Projects() {
+	agents, count := agentRows(s)
+	m.agents = count
+	projects := s.Projects()
+	if m.tab == ChatTab {
+		m.rows, projects = append(m.rows, agents...), nil
+	}
+	for _, p := range projects {
 		var ids []string
 		for _, sess := range p.Sessions {
 			ids = append(ids, sess.ID)
@@ -123,15 +207,16 @@ func (m *Model) Refresh(s *state.Store, active, task string) {
 		if m.collapsed[p.Path] {
 			continue
 		}
+		gap := row{kind: gapRow, project: p}
 		for _, sess := range p.Sessions {
-			m.rows = append(m.rows, row{kind: sessionRow, project: p, session: sess, depth: 1, sessions: []string{sess.ID}})
-			children := s.Children(sess.ID)
-			for i, id := range sess.TaskOrder {
-				last := i == len(sess.TaskOrder)-1 && len(children) == 0
-				m.rows = append(m.rows, row{kind: taskRow, project: p, session: sess, task: sess.Tasks[id], depth: 2, last: last, sessions: []string{sess.ID}})
+			m.rows = append(m.rows, row{kind: sessionRow, project: p, session: sess, depth: 1, sessions: []string{sess.ID}}, gap)
+			if sess.ID == active {
+				for _, id := range sess.TaskOrder {
+					m.rows = append(m.rows, row{kind: taskRow, project: p, session: sess, task: sess.Tasks[id], depth: 2, sessions: []string{sess.ID}}, gap)
+				}
 			}
-			for i, child := range children {
-				m.rows = append(m.rows, row{kind: sessionRow, project: p, session: child, depth: 2, last: i == len(children)-1, sessions: []string{child.ID}})
+			for _, child := range s.Children(sess.ID) {
+				m.rows = append(m.rows, row{kind: sessionRow, project: p, session: child, depth: 2, sessions: []string{child.ID}}, gap)
 			}
 		}
 	}
@@ -143,11 +228,14 @@ func (m *Model) Refresh(s *state.Store, active, task string) {
 		}
 	}
 
-	if active != m.active || task != m.task {
-		m.active, m.task = active, task
+	if active != m.active || task != m.task || m.retarget {
+		m.active, m.task, m.retarget = active, task, false
 		m.cursor = m.activeRow()
 	}
 	m.cursor = min(max(m.cursor, 0), max(len(m.rows)-1, 0))
+	if len(m.rows) > 0 && !m.rows[m.cursor].kind.selectable() {
+		m.cursor = m.step(m.cursor, 1)
+	}
 	m.keepVisible()
 }
 
@@ -175,9 +263,9 @@ func (m *Model) activeRow() int {
 
 func (m *Model) isActive(r row) bool {
 	switch r.kind {
-	case sessionRow:
+	case sessionRow, agentRow:
 		return r.session.ID == m.active && m.task == ""
-	case taskRow:
+	case taskRow, agentTaskRow:
 		return r.session.ID == m.active && r.task.ID == m.task
 	}
 	return false
@@ -206,6 +294,12 @@ func (m *Model) Key(msg tea.KeyPressMsg) tea.Cmd {
 		return emit(NewProjectMsg{})
 	case "A", "shift+a":
 		return emit(ToggleArchivedMsg{})
+	case "1":
+		m.SetTab(ProjectsTab)
+		return nil
+	case "2":
+		m.SetTab(ChatTab)
+		return nil
 	}
 	if len(m.rows) == 0 {
 		return nil
@@ -223,9 +317,9 @@ func (m *Model) Key(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch msg.String() {
 	case "up", "k":
-		m.cursor = max(m.cursor-1, 0)
+		m.cursor = m.step(m.cursor, -1)
 	case "down", "j":
-		m.cursor = min(m.cursor+1, len(m.rows)-1)
+		m.cursor = m.step(m.cursor, 1)
 	case "left", "h":
 		if r := m.rows[m.cursor]; r.kind == projectRow {
 			m.collapsed[r.project.Path] = true
@@ -253,8 +347,10 @@ func (m *Model) activate(r row) tea.Cmd {
 	case projectRow:
 		m.collapsed[r.project.Path] = !m.collapsed[r.project.Path]
 		return nil
-	case taskRow:
+	case taskRow, agentTaskRow:
 		return emit(SelectMsg{SessionID: r.session.ID, TaskID: r.task.ID})
+	case headRow, gapRow:
+		return nil
 	default:
 		return emit(SelectMsg{SessionID: r.session.ID})
 	}
@@ -280,16 +376,21 @@ func (m *Model) Press(x, y int, button tea.MouseButton) tea.Cmd {
 		return emit(OpenVaultMsg{})
 	}
 	if y == actionsRow {
-		if x < lipgloss.Width(newChatLabel)+1 {
-			return m.newChat()
-		}
-		if x < lipgloss.Width(newChatLabel)+2+lipgloss.Width(newProjLabel)+1 {
+		first := lipgloss.Width(m.tabLabel(ProjectsTab))
+		switch {
+		case x < first:
+			m.SetTab(ProjectsTab)
+		case x < first+lipgloss.Width(m.tabLabel(ChatTab)):
+			m.SetTab(ChatTab)
+		case x >= m.width-lipgloss.Width(addLabel)-1 && m.tab == ProjectsTab:
 			return emit(NewProjectMsg{})
+		case x >= m.width-lipgloss.Width(addLabel)-1:
+			return m.newChat()
 		}
 		return nil
 	}
 	i, ok := m.rowAt(y)
-	if !ok {
+	if !ok || !m.rows[i].kind.selectable() {
 		return nil
 	}
 	m.cursor = i
@@ -351,11 +452,86 @@ func (m *Model) Scroll(delta int) {
 
 func (m *Model) label(r row) string {
 	switch r.kind {
-	case projectRow:
+	case projectRow, headRow, gapRow:
 		return r.project.Name
 	default:
 		return Title(r.session)
 	}
+}
+
+func (m Model) tabs() string {
+	th := m.theme
+	on := lipgloss.NewStyle().Background(th.Card).Foreground(th.Ink).Bold(true)
+	var b strings.Builder
+	for _, t := range []Tab{ProjectsTab, ChatTab} {
+		if t == m.tab {
+			b.WriteString(on.Render(m.tabLabel(t)))
+		} else {
+			b.WriteString(th.Muted.Render(m.tabLabel(t)))
+		}
+	}
+	return spread(b.String(), th.Muted.Render(addLabel), max(m.width, 1))
+}
+
+func clock(d time.Duration) string {
+	s := int(d / time.Second)
+	if s >= 3600 {
+		return fmt.Sprintf("%dh", s/3600)
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
+}
+
+func (m Model) card(r row, cursor bool) string {
+	th := m.theme
+	bg := th.Card
+	if m.isActive(r) {
+		bg = th.Selection
+	}
+	on := func(st lipgloss.Style) lipgloss.Style { return st.Background(bg) }
+	indent := 1
+	if r.depth == 2 {
+		indent = 3
+	}
+
+	var key, name, text, mark, right string
+	var rightStyle lipgloss.Style
+	if r.task != nil {
+		key, text = r.task.Model, taskLabel(r.task)
+		if key == theme.ClaudeCode || key == theme.Codex {
+			name = key
+		}
+		right, rightStyle = taskIcon(th, r.task.Status)
+		if r.task.Status == "running" {
+			right, rightStyle = clock(r.task.Elapsed(time.Now())), th.Muted
+		}
+	} else {
+		key, text = r.session.Model, Title(r.session)
+		right, rightStyle = statusWord(th, r.session)
+		if right == "" && r.session.Status != state.Paused {
+			right, rightStyle = statusIcon(th, r.session.Status)
+		}
+		if r.session.SharedMemory {
+			mark = sharedMark + " "
+		}
+	}
+	textStyle := th.Text
+	if cursor {
+		textStyle = th.Strong
+	}
+
+	w := max(m.width-indent-1, 10)
+	room := max(w-3-lipgloss.Width(mark)-lipgloss.Width(right)-2, 1)
+	body := on(textStyle).Render(fit(text, room))
+	if name != "" {
+		name = fit(name, min(12, room))
+		body = on(th.Muted).Render(name)
+		if rest := room - lipgloss.Width(name) - 1; rest > 2 {
+			body += on(textStyle).Render(" " + fit(text, rest))
+		}
+	}
+	gap := max(w-3-lipgloss.Width(body)-lipgloss.Width(mark)-lipgloss.Width(right)-1, 1)
+	return strings.Repeat(" ", indent) + on(th.Tint(key)).Render(" ■ ") + body + on(th.Text).Render(strings.Repeat(" ", gap)) +
+		on(th.Accent).Render(mark) + on(rightStyle).Render(right) + on(th.Text).Render(" ")
 }
 
 func Title(sess *state.Session) string {
@@ -373,17 +549,14 @@ func Title(sess *state.Session) string {
 func (m Model) View(focused bool) string {
 	th := m.theme
 	w := max(m.width, 1)
-	search := th.Box(false).Width(w).Render(spread(th.Faint.Render("⌕ search"), th.Faint.Render("soon"), w-4))
-	actions := th.Accent.Render(newChatLabel) + "  " + th.Text.Render(newProjLabel)
-	if lipgloss.Width(newChatLabel+"  "+newProjLabel) > w {
-		actions = th.Accent.Render(fit(newChatLabel+"  "+newProjLabel, w))
-	}
-	lines := append([]string{actions}, strings.Split(search, "\n")...)
-	lines = append(lines, th.Heading.Render("projects"))
+	lines := []string{m.tabs(), ""}
 
 	h := m.listHeight()
 	for i := m.offset; i < min(m.offset+h, len(m.rows)); i++ {
 		lines = append(lines, m.renderRow(m.rows[i], i == m.cursor && focused))
+	}
+	if m.tab == ChatTab && len(m.rows) == 0 {
+		lines = append(lines, th.Faint.Render(fit(" no agents running", w)))
 	}
 	for len(lines) < listTop+h {
 		lines = append(lines, "")
@@ -392,77 +565,36 @@ func (m Model) View(focused bool) string {
 	vault := spread(th.Text.Render("⚿ vault"), th.Muted.Render(fmt.Sprintf("%d of %d keys", m.keys, m.models)), w)
 	legend := th.Muted.Render(fit("● run ! you ○ idle ✓ done "+sharedMark+" shared", w))
 	lines = append(lines, th.Rule.Render(strings.Repeat("─", w)), vault, legend)
-	return lipgloss.NewStyle().Width(w).Height(m.height).MaxHeight(m.height).Render(strings.Join(lines, "\n"))
+	view := lipgloss.NewStyle().Width(w).Height(m.height).MaxHeight(m.height).MaxWidth(w).Render(strings.Join(lines, "\n"))
+	return theme.Fill(view, th.Panel, w)
 }
 
 func (m Model) renderRow(r row, cursor bool) string {
 	th := m.theme
-	selected := m.isActive(r)
-	var bg color.Color
-	if selected {
-		bg = th.Selection
-	}
-	paint := func(st lipgloss.Style, s string) string {
-		if bg != nil {
-			st = st.Background(bg)
-		}
-		return st.Render(s)
-	}
-
-	marker := " "
-	markStyle := th.Muted
-	switch {
-	case selected:
-		marker, markStyle = "▎", th.Accent
-	case cursor:
-		marker, markStyle = "›", th.Accent
-	}
-
-	var icon, text, mark, right string
-	iconStyle, textStyle, rightStyle := th.Muted, th.Text, th.Muted
-	indent := strings.Repeat("  ", r.depth)
-	if r.depth == 2 {
-		indent = "  " + branch(r.last)
-	}
-
 	switch r.kind {
-	case projectRow:
-		icon, textStyle = "▾", th.Strong
-		if m.collapsed[r.project.Path] {
-			icon = "▸"
-		}
-		iconStyle = th.Strong
-		text = r.project.Name
-		right = fmt.Sprint(len(r.project.Sessions)) + " +"
-		if n := needsYou(r.project); n > 0 {
-			right, rightStyle = fmt.Sprintf("%d! +", n), th.Warn
-		}
-	case sessionRow:
-		icon, iconStyle = statusIcon(th, r.session.Status)
-		text = Title(r.session)
-		right, rightStyle = statusWord(th, r.session)
-		if r.session.SharedMemory {
-			mark = sharedMark
-		}
-	case taskRow:
-		icon, iconStyle = taskIcon(th, r.task.Status)
-		text, textStyle = "exec · "+taskLabel(r.task), th.Muted
-		if selected {
-			textStyle = th.Text
-		}
-	}
-	if mark != "" && right != "" {
-		mark += " "
+	case gapRow:
+		return ""
+	case headRow:
+		return th.Muted.Render(fit(" "+r.project.Name, max(m.width, 1)))
+	case sessionRow, taskRow, agentRow, agentTaskRow:
+		return m.card(r, cursor)
 	}
 
-	left := 1 + lipgloss.Width(indent) + lipgloss.Width(icon) + 1
-	tail := lipgloss.Width(mark) + lipgloss.Width(right)
-	room := max(m.width-left-tail-1, 1)
-	text = fit(text, room)
-	gap := max(m.width-left-lipgloss.Width(text)-tail, 1)
-
-	return paint(markStyle, marker) + paint(th.Muted, indent) + paint(iconStyle, icon) + paint(th.Text, " ") +
-		paint(textStyle, text) + paint(th.Text, strings.Repeat(" ", gap)) + paint(th.Accent, mark) + paint(rightStyle, right)
+	marker, icon := " ", "▾"
+	if cursor {
+		marker = "›"
+	}
+	if m.collapsed[r.project.Path] {
+		icon = "▸"
+	}
+	right, rightStyle := fmt.Sprint(len(r.project.Sessions))+" +", th.Muted
+	if n := needsYou(r.project); n > 0 {
+		right, rightStyle = fmt.Sprintf("%d! +", n), th.Warn
+	}
+	left := 3
+	text := fit(r.project.Name, max(m.width-left-lipgloss.Width(right)-1, 1))
+	gap := max(m.width-left-lipgloss.Width(text)-lipgloss.Width(right), 1)
+	return th.Accent.Render(marker) + th.Strong.Render(icon+" "+text) + strings.Repeat(" ", gap) + rightStyle.Render(right)
 }
 
 func statusIcon(th *theme.Theme, st state.Status) (string, lipgloss.Style) {
@@ -500,9 +632,7 @@ func statusWord(th *theme.Theme, sess *state.Session) (string, lipgloss.Style) {
 		return "failed", th.Warn
 	case state.Interrupted:
 		return "interrupted", th.Muted
-	case state.Paused:
-		return "paused", th.Muted
-	case state.Working:
+	case state.Paused, state.Working:
 		return "", th.Muted
 	}
 	if sess.Unread {
@@ -548,13 +678,6 @@ func needsYou(p state.Project) int {
 		}
 	}
 	return n
-}
-
-func branch(last bool) string {
-	if last {
-		return "└ "
-	}
-	return "├ "
 }
 
 func spread(left, right string, width int) string {

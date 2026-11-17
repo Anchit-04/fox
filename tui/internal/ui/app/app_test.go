@@ -57,7 +57,7 @@ func TestANewChatInAProjectWithSharedMemory(t *testing.T) {
 	m.update(sidebar.NewChatMsg{Workspace: "/w/api", Name: "api"})
 	m.update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	m.sync()
-	if !m.chat.shared {
+	if !m.draftChat.shared {
 		t.Fatal("ctrl+s did not turn on shared memory")
 	}
 	m.update(composer.SubmitMsg{Text: "add a route"})
@@ -66,8 +66,8 @@ func TestANewChatInAProjectWithSharedMemory(t *testing.T) {
 		t.Fatalf("starts = %+v", starts)
 	}
 	event(t, m, `{"type":"session_started","session_id":"s1","workspace":"/w/api","shared_memory":true}`)
-	if m.active != "s1" || m.chat.shared {
-		t.Fatalf("active %q, chat %+v", m.active, m.chat)
+	if m.active != "s1" || m.draftChat.shared {
+		t.Fatalf("active %q, chat %+v", m.active, m.draftChat)
 	}
 }
 
@@ -78,8 +78,8 @@ func TestANewProjectAsksForAFolderThenStartsThere(t *testing.T) {
 		t.Fatal("new project did not ask for a folder")
 	}
 	m.update(composer.SubmitMsg{Text: `"/w/new"`})
-	if m.askPath || m.chat.workspace != "/w/new" || m.chat.name != "new" {
-		t.Fatalf("chat = %+v askPath = %v", m.chat, m.askPath)
+	if m.askPath || m.draftChat.workspace != "/w/new" || m.draftChat.name != "new" {
+		t.Fatalf("chat = %+v askPath = %v", m.draftChat, m.askPath)
 	}
 	if len(r.starts()) != 0 {
 		t.Fatal("the folder path was sent as a task")
@@ -109,7 +109,7 @@ func TestMemoryCannotBeSwitchedAfterStart(t *testing.T) {
 	event(t, m, `{"session_id":"s1","seq":1,"type":"session_started","task":"t","workspace":"/w/api","memory_space":"s1"}`)
 	m.active = "s1"
 	m.toggleShared()
-	if m.chat.shared {
+	if m.draftChat.shared {
 		t.Fatal("a running chat switched to shared memory")
 	}
 	if m.banner() != "" {
@@ -122,8 +122,8 @@ func TestCtrlNStartsANewChatInTheActiveChatsProject(t *testing.T) {
 	event(t, m, `{"session_id":"s1","seq":1,"type":"session_started","task":"t","workspace":"/w/api","memory_space":"s1"}`)
 	m.active = "s1"
 	m.update(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
-	if m.active != "" || m.chat.workspace != "/w/api" || m.chat.name != "api" {
-		t.Fatalf("active %q chat %+v", m.active, m.chat)
+	if m.active != "" || m.draftChat.workspace != "/w/api" || m.draftChat.name != "api" {
+		t.Fatalf("active %q chat %+v", m.active, m.draftChat)
 	}
 }
 

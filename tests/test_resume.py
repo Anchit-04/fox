@@ -59,6 +59,15 @@ class ResumeRules(unittest.TestCase):
         self.assertEqual(registry.get("t1").report.outcome, "ok")
         self.assertEqual(registry.create("next", registry.get("t1").lane, []).id, "t3")
 
+    def test_an_external_agents_session_survives_a_restart(self):
+        self.task("t1", "running")
+        self.store.append_event("s1", "task_status_changed", {
+            "task_id": "t1", "status": "done", "error": None, "external_session": "cc1",
+            "report": {"outcome": "ok", "changes": [], "validation": "v", "blockers": []}})
+        self.store.append_event("s1", "task_reopened", {"task_id": "t1", "run": 2})
+        self.store.append_event("s1", "task_status_changed", {"task_id": "t1", "status": "failed", "error": "x"})
+        self.assertEqual(resume.restore_registry(self.store, "s1").get("t1").external_session, "cc1")
+
     def test_a_chat_waiting_for_you_is_told_apart_from_one_mid_run(self):
         self.assertTrue(resume.was_waiting([Turn(role="user", text="hi"), Turn(role="assistant", text="hello")]))
         self.assertFalse(resume.was_waiting([Turn(role="assistant", tool_calls=[ToolCall("a", "read_file", {})])]))

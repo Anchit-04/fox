@@ -99,10 +99,66 @@ func SidebarWidth(width, preferred int) int {
 	return min(max(preferred, MinSidebar), max(width-minMain-1, MinSidebar))
 }
 
-func Compute(width, height, sidebarPreferred, composerHeight int, side bool) Frame {
+const (
+	MinPaneW = 30
+	MinPaneH = 7
+	paneGap  = 1
+	maxCols  = 3
+)
+
+func GridFit(area Rect) (int, int) {
+	cols := min(max((area.W+paneGap)/(MinPaneW+paneGap), 1), maxCols)
+	rows := max((area.H+paneGap)/(MinPaneH+paneGap), 1)
+	return cols, rows
+}
+
+func GridCols(n int) int {
+	switch {
+	case n <= 3:
+		return max(n, 1)
+	case n == 4:
+		return 2
+	}
+	return maxCols
+}
+
+func gaps(n int) []int {
+	sizes := make([]int, 0, n*2)
+	for i := range n {
+		if i > 0 {
+			sizes = append(sizes, paneGap)
+		}
+		sizes = append(sizes, 0)
+	}
+	return sizes
+}
+
+func Grid(area Rect, n, cols int) []Rect {
+	if n <= 0 || cols <= 0 || area.W <= 0 || area.H <= 0 {
+		return nil
+	}
+	rows := (n + cols - 1) / cols
+	out := make([]Rect, 0, n)
+	for r, band := range SplitV(area, gaps(rows)...) {
+		if r%2 == 1 {
+			continue
+		}
+		for c, cell := range SplitH(band, gaps(cols)...) {
+			if c%2 == 0 && len(out) < n {
+				out = append(out, cell)
+			}
+		}
+	}
+	return out
+}
+
+func Compute(width, height, sidebarPreferred, composerHeight int, side, hideSidebar bool) Frame {
 	screen := Rect{W: width, H: height}
 	var f Frame
 	sidebarW := SidebarWidth(width, sidebarPreferred)
+	if hideSidebar {
+		sidebarW = 0
+	}
 	if sidebarW > 0 {
 		cols := SplitH(screen, sidebarW, 1, 0)
 		f.Sidebar, f.Divider, f.Main = cols[0], cols[1], cols[2]

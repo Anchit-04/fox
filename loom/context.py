@@ -9,7 +9,10 @@ MAX_ITERATIONS: hard stop, so a looping agent can't run forever.
 
 import json
 
-MAX_ITERATIONS = 30
+MAX_ITERATIONS = 100
+WRAP_UP_TURNS = 4
+WRAP_UP_NOTE = ("[fox] You have {left} turns left on this task. Stop exploring and call `report` now with what "
+                "you have found, and say what is still missing.")
 COMPACT_AT_CHARS = 600_000
 
 

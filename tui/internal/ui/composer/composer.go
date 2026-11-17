@@ -23,10 +23,11 @@ type ToggleModeMsg struct{}
 type BannerMsg struct{}
 
 const (
-	minLines = 1
-	maxLines = 6
-	chrome   = 3
-	chipGap  = 2
+	minLines   = 1
+	maxLines   = 10
+	maxContent = 2000
+	chrome     = 3
+	chipGap    = 2
 )
 
 type Model struct {
@@ -42,6 +43,10 @@ func New(th *theme.Theme) Model {
 	ta := textarea.New()
 	ta.Prompt = ""
 	ta.ShowLineNumbers = false
+	ta.DynamicHeight = true
+	ta.MinHeight = minLines
+	ta.MaxHeight = maxLines
+	ta.MaxContentHeight = maxContent
 	ta.SetHeight(minLines)
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "shift+enter"))
 	st := ta.Styles()
@@ -60,7 +65,6 @@ func New(th *theme.Theme) Model {
 func (m *Model) SetWidth(w int) {
 	m.width = w
 	m.input.SetWidth(max(w-4, 1))
-	m.fit()
 }
 
 func (m *Model) SetModel(name string) {
@@ -107,12 +111,10 @@ func (m Model) Value() string {
 
 func (m *Model) SetValue(s string) {
 	m.input.SetValue(s)
-	m.fit()
 }
 
 func (m *Model) Reset() {
 	m.input.Reset()
-	m.fit()
 }
 
 func (m *Model) Update(msg tea.Msg) tea.Cmd {
@@ -126,7 +128,6 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	m.fit()
 	return cmd
 }
 
@@ -144,11 +145,6 @@ func (m *Model) Press(x, y int) tea.Cmd {
 		}
 	}
 	return m.Focus()
-}
-
-func (m *Model) fit() {
-	rows := displayRows(m.input.Value(), max(m.input.Width(), 1))
-	m.input.SetHeight(min(max(rows, minLines), maxLines))
 }
 
 func (m Model) chipView() string {
@@ -172,14 +168,6 @@ func (m Model) View(hint string) string {
 		view = ansi.Truncate(m.banner, max(m.width, 1), "…") + "\n" + view
 	}
 	return view
-}
-
-func displayRows(s string, width int) int {
-	rows := 0
-	for _, line := range strings.Split(s, "\n") {
-		rows += max((lipgloss.Width(line)+width)/width, 1)
-	}
-	return rows
 }
 
 func clip(s string, width int) string {

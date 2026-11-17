@@ -292,6 +292,12 @@ class LiveActions(unittest.TestCase):
         self.actions.scroll("bottom")
         self.assertIn("Bottom of the page", self.actions.snapshot(full=True).text)
 
+    def test_scroll_says_when_the_page_cannot_go_further(self):
+        self.actions.scroll("top")
+        result = self.actions.scroll("up")
+        self.assertEqual(self.page.evaluate("scrollY"), 0)
+        self.assertIn("already as far up as it goes", result.text)
+
     def test_back_and_forward(self):
         self.actions.navigate(self.base + "/two")
         self.assertIn("Page: One", self.actions.back().text)
@@ -350,6 +356,17 @@ class LiveActions(unittest.TestCase):
         self.assertIn("The human finished the step.", result.text)
         self.assertIn("Page: Two", result.text)
         self.assertFalse(self.page.evaluate("!!document.getElementById('__fox_handoff')"))
+
+    def test_a_second_step_after_the_login_is_noticed(self):
+        self.start_login_handoff()
+        self.page.evaluate("document.body.innerHTML = '<input autocomplete=\"one-time-code\">'")
+        need = self.actions.next_need()
+        self.assertEqual(need.kind, "code")
+
+    def test_no_second_step_means_the_handoff_is_over(self):
+        self.start_login_handoff()
+        self.page.evaluate("document.body.innerHTML = '<p>Welcome</p>'")
+        self.assertIsNone(self.actions.next_need())
 
     def test_a_failed_login_keeps_waiting_and_brings_the_bar_back(self):
         self.start_login_handoff()

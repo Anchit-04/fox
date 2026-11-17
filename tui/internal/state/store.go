@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"fox/tui/internal/protocol"
 )
@@ -58,6 +59,37 @@ type Task struct {
 	Error       string
 	Report      *protocol.Report
 	Cost        float64
+	SignIn      string
+
+	Started      time.Time
+	Ended        time.Time
+	InputTokens  int
+	OutputTokens int
+	Steps        int
+	Rev          int
+}
+
+func TaskFinished(status string) bool {
+	switch status {
+	case "done", "failed", "cancelled", "escalated":
+		return true
+	}
+	return false
+}
+
+func (t *Task) Finished() bool { return TaskFinished(t.Status) }
+
+func (t *Task) Live() bool { return t.Status == "running" || t.Status == "needs-approval" }
+
+func (t *Task) Elapsed(now time.Time) time.Duration {
+	if t.Started.IsZero() {
+		return 0
+	}
+	end := now
+	if !t.Ended.IsZero() {
+		end = t.Ended
+	}
+	return max(end.Sub(t.Started), 0)
 }
 
 type Session struct {
@@ -111,7 +143,18 @@ type Store struct {
 	Notices          []string
 	DefaultWorkspace string
 	ShowArchived     bool
+	Now              func() time.Time
 	pending          []PendingStart
+}
+
+func (s *Store) when(ev protocol.Event) time.Time {
+	if t, ok := ev.Time(); ok {
+		return t
+	}
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 func (s *Store) Remove(ids ...string) {

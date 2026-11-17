@@ -141,6 +141,10 @@ def headless_by_default() -> bool:
     return os.environ.get("FOX_BROWSER_HEADLESS", "").strip().lower() in ("1", "true", "yes")
 
 
+def visible_by_default() -> bool:
+    return os.environ.get("FOX_BROWSER_VISIBLE", "").strip().lower() in ("1", "true", "yes")
+
+
 def launch(executable: Path, profile: Path, headless: bool | None = None, timeout: float = 10.0) -> Browser:
     if headless is None:
         headless = headless_by_default()
